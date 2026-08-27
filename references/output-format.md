@@ -10,7 +10,7 @@ Read this file when presenting the final route comparison. The aim is fast visua
    | 方案 | 关键时刻（出门 → 发车 → 到达） | 总耗时 | 费用 | 换乘 / 步行 | 稳妥度 |
    |---|---|---:|---:|---|---|
 
-   Put the train number or other main service beside its departure time. Show a complete price as `¥81/人；2人¥162`; show a partial price as `已知¥74/人 + 末段待定`; show unknown amounts as `待查`, never `¥0`. If the origin leg is unmodeled, replace the invented leave time with `HH:MM前到站 + 住处接驳`.
+   Put the train number or other main service beside its departure time. Show a complete price as `¥81/人；2人¥162`; show a partial price as `已知¥74/人 + 末段待定`; show unknown amounts as `待查`, never `¥0`. If the origin leg is unmodeled, replace the invented leave time with `HH:MM前到站 + 住处接驳`, and write the duration as `已知18小时13分 + 住处接驳`, not as a complete total.
 3. Under the table, expand the recommended route as a single chronological line, for example: `08:03 出门 → 08:38 到杭州东 → 09:13 Gxxxx → 10:05 到上海南 → 10:42 到目的地`.
 4. Expand at most one additional route when it represents a meaningful tradeoff such as saving money, arriving materially earlier, or avoiding a difficult transfer.
 5. Finish with no more than three compact notes covering shared assumptions, missing costs or uncertainty, and provider/query freshness.
@@ -18,8 +18,10 @@ Read this file when presenting the final route comparison. The aim is fast visua
 ## Information hierarchy
 
 - The three key times must be visible without opening details: recommended door departure, main scheduled departure, and estimated final arrival.
+- Do not present a single train's runtime as the itinerary total. Prefer `门到门18小时50分（车内14小时41分，候车3小时32分）` when the breakdown matters; otherwise keep only the complete total in the table and move the breakdown to the timeline.
 - Use labels such as `推荐`, `最快`, `最省`, and `少换乘`; combine labels when one route wins multiple categories and do not duplicate the route.
 - If search coverage is bounded or truncated, use `已查最快` / `已查最省`. If a route has incomplete time or price, it is ineligible for the corresponding label.
+- Near first/last service boundaries, an unverified point estimate is conditional: show `若首班可乘，最早约07:20` and label it `待确认`, not `预计07:20到`.
 - Express tradeoffs as deltas where possible: `比推荐早到12分钟，贵¥18/人` is easier to compare than repeating both routes.
 - Keep per-leg fares and minor stops in the expanded timeline or notes unless they explain a route's price difference.
 - Put common data sources and query timestamps in one footer instead of repeating them in every row.
@@ -37,4 +39,4 @@ Do not use a confidence label merely for decoration. State the decisive reason b
 
 Show first/last-service constraints only when the trip is near service boundaries. Show accessibility, elevator, luggage, child, or elderly-traveler concerns when the user mentions them or when they materially distinguish routes. This keeps the default table clean while preserving important constraints.
 
-For an overnight request, prefer two decision-relevant rows over many near-duplicates: the lowest verified available fare and the lowest verified sleeper fare. Put `硬座过夜` or `硬卧/动卧` in the burden column, and show the sleeper upgrade delta. Inventory and comfort are separate: a quoted sleeper price with sold-out inventory is not a usable sleeper option.
+For an overnight request, prefer two decision-relevant rows over many near-duplicates: the lowest verified available fare and the lowest verified sleeper fare. Put `硬座过夜8小时` or `硬卧/动卧` in the burden column, and show the sleeper upgrade delta. Inventory and comfort are separate: a quoted sleeper price with sold-out inventory goes in a clearly separated `仅报价/售罄预览`, not among usable recommendations.

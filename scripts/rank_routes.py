@@ -8,10 +8,13 @@ import copy
 import json
 import math
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 OPTIMIZATIONS = ("balanced", "fastest", "cheapest", "fewest-transfers")
+VEHICLE_MODES = {"rail", "metro", "bus", "taxi", "ferry", "flight"}
+LOCAL_CONNECTION_MODES = {"walk", "metro", "bus", "taxi"}
 
 
 def number(value: Any) -> float | None:
@@ -22,6 +25,141 @@ def number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def near_service_boundary(value: Any) -> bool:
+    instant = iso_datetime(value)
+    if instant is None:
+        return False
+    minute = instant.hour * 60 + instant.minute
+    return minute < 6 * 60 + 30 or minute >= 22 * 60 + 30
+
+
+def is_executable(route: dict[str, Any]) -> bool:
+    return route.get("executable", route.get("inventory_confirmed", True)) is True
+
+
+def apply_service_window_gate(route: dict[str, Any]) -> None:
+    legs = route.get("legs") if isinstance(route.get("legs"), list) else []
+    boundary_local_service = any(
+        isinstance(leg, dict)
+        and str(leg.get("mode")) in {"metro", "bus"}
+        and (
+            near_service_boundary(leg.get("departure_at"))
+            or near_service_boundary(leg.get("arrival_at"))
+        )
+        for leg in legs
+    )
+    verified = route.get("service_window_verified") is True
+    route["arrival_estimate_confirmed"] = not boundary_local_service or verified
+    if not boundary_local_service or verified:
+        route.setdefault("service_window_status", "verified_or_not_boundary_sensitive")
+        return
+    route["service_window_status"] = "unverified_boundary"
+    arrival = route.get("estimated_arrival_at")
+    if arrival:
+        route.setdefault("earliest_if_service_available", arrival)
+        route["estimated_arrival_at"] = None
+    warnings = route.setdefault("warnings", [])
+    if isinstance(warnings, list) and "首末班运营时段待确认" not in warnings:
+        warnings.append("首末班运营时段待确认")
+    route["time_complete"] = False
+
+
+def apply_duration_breakdown(route: dict[str, Any]) -> None:
+    legs = route.get("legs") if isinstance(route.get("legs"), list) else []
+    scheduled = [
+        leg
+        for leg in legs
+        if isinstance(leg, dict)
+        and (leg.get("scheduled") is True or leg.get("mode") == "rail")
+        and iso_datetime(leg.get("departure_at"))
+        and iso_datetime(leg.get("arrival_at"))
+    ]
+    if scheduled:
+        first_departure = min(iso_datetime(leg["departure_at"]) for leg in scheduled)
+        last_arrival = max(iso_datetime(leg["arrival_at"]) for leg in scheduled)
+        scheduled_span = int((last_arrival - first_departure).total_seconds() // 60)
+    else:
+        scheduled_span = number(route.get("scheduled_span_minutes"))
+
+    def summed_duration(modes: set[str]) -> int:
+        return sum(
+            int(value)
+            for leg in legs
+            if isinstance(leg, dict) and str(leg.get("mode")) in modes
+            if (value := number(leg.get("duration_minutes"))) is not None
+        )
+
+    in_vehicle = summed_duration(VEHICLE_MODES)
+    local_connection = summed_duration(LOCAL_CONNECTION_MODES)
+    checkin_buffer = sum(
+        int(value)
+        for leg in legs
+        if isinstance(leg, dict)
+        and leg.get("mode") == "buffer"
+        and str(leg.get("buffer_type", "checkin")) == "checkin"
+        if (value := number(leg.get("duration_minutes"))) is not None
+    )
+    waiting = sum(
+        int(value)
+        for leg in legs
+        if isinstance(leg, dict) and leg.get("mode") in {"dwell", "wait"}
+        if (value := number(leg.get("duration_minutes"))) is not None
+    )
+    waiting += sum(
+        int(value)
+        for leg in legs
+        if isinstance(leg, dict)
+        and leg.get("mode") == "buffer"
+        and str(leg.get("buffer_type", "checkin")) != "checkin"
+        if (value := number(leg.get("duration_minutes"))) is not None
+    )
+
+    leave = iso_datetime(route.get("recommended_leave_at"))
+    arrival = iso_datetime(route.get("estimated_arrival_at"))
+    if arrival is None:
+        arrival = iso_datetime(route.get("earliest_if_service_available"))
+    door_to_door = (
+        int((arrival - leave).total_seconds() // 60)
+        if leave is not None and arrival is not None and arrival >= leave
+        else None
+    )
+    if door_to_door is None and route.get("time_complete") is True:
+        legacy_duration = number(route.get("duration_minutes"))
+        door_to_door = int(legacy_duration) if legacy_duration is not None else None
+
+    unknown_origin = bool(route.get("unknown_origin_connection", leave is None))
+    route["door_to_door_duration_minutes"] = door_to_door
+    route["scheduled_span_minutes"] = (
+        int(scheduled_span) if scheduled_span is not None else None
+    )
+    route["in_vehicle_minutes"] = int(
+        number(route.get("in_vehicle_minutes")) or in_vehicle
+    )
+    route["waiting_minutes"] = int(number(route.get("waiting_minutes")) or waiting)
+    route["checkin_buffer_minutes"] = int(
+        number(route.get("checkin_buffer_minutes")) or checkin_buffer
+    )
+    route["local_connection_minutes"] = int(
+        number(route.get("local_connection_minutes")) or local_connection
+    )
+    route["unknown_origin_connection"] = unknown_origin
+    route["duration_complete"] = bool(
+        route.get("time_complete") is True
+        and not route.get("unmodeled_legs")
+        and door_to_door is not None
+        and route.get("arrival_estimate_confirmed") is not False
+    )
 
 
 def read_routes(path: Path) -> list[dict[str, Any]]:
@@ -63,6 +201,9 @@ def read_routes(path: Path) -> list[dict[str, Any]]:
             if not isinstance(value, list):
                 raise ValueError(f"route {route['id']} field {field} must be an array")
             route[field] = value
+        apply_service_window_gate(route)
+        time_complete = route.get("time_complete", time_complete)
+        apply_duration_breakdown(route)
         if price_complete and route["unpriced_legs"]:
             raise ValueError(
                 f"route {route['id']} has unpriced legs but marks price complete"
@@ -77,6 +218,25 @@ def read_routes(path: Path) -> list[dict[str, Any]]:
         route["price_cny_per_person"] = price
         route["price_complete"] = price_complete
         route["time_complete"] = time_complete
+        inventory_confirmed = route.get("inventory_confirmed", True) is True
+        route["inventory_confirmed"] = inventory_confirmed
+        route["executable"] = (
+            bool(route.get("executable", True)) and inventory_confirmed
+        )
+        route.setdefault(
+            "inventory_status",
+            "available" if inventory_confirmed else "quoted_or_unavailable",
+        )
+        route.setdefault(
+            "connection_reliability",
+            "high_risk"
+            if risk >= 0.65
+            else "medium_risk"
+            if risk >= 0.3
+            else "low_risk",
+        )
+        route.setdefault("transfer_burden", "not_assessed")
+        route.setdefault("overnight_seated_minutes", 0)
         routes.append(route)
     return routes
 
@@ -126,7 +286,9 @@ def add_balanced_scores(routes: list[dict[str, Any]]) -> None:
     known_prices = [
         float(route["price_cny_per_person"])
         for route in routes
-        if route["price_complete"] and route["price_cny_per_person"] is not None
+        if route["price_complete"]
+        and route["price_cny_per_person"] is not None
+        and is_executable(route)
     ]
     for route in routes:
         price = route["price_cny_per_person"]
@@ -142,6 +304,7 @@ def add_balanced_scores(routes: list[dict[str, Any]]) -> None:
             + 0.1 * normalized(float(route["risk_score"]), risks)
             + (0.2 if not route["price_complete"] else 0)
             + (0.2 if not route["time_complete"] or route["unmodeled_legs"] else 0)
+            + (0.8 if not is_executable(route) else 0)
         )
         route["_balanced_score"] = round(score, 6)
 
@@ -156,6 +319,8 @@ def dominates(left: dict[str, Any], right: dict[str, Any]) -> bool:
         or right["unmodeled_legs"]
         or left["price_cny_per_person"] is None
         or right["price_cny_per_person"] is None
+        or not is_executable(left)
+        or not is_executable(right)
     ):
         return False
     left_values = (
@@ -183,6 +348,7 @@ def pareto_ids(routes: list[dict[str, Any]]) -> set[str]:
         and route["time_complete"]
         and not route["unmodeled_legs"]
         and route["price_cny_per_person"] is not None
+        and is_executable(route)
     ]
     return {
         str(candidate["id"])
@@ -205,25 +371,35 @@ def sort_key(route: dict[str, Any], optimize: str) -> tuple[Any, ...]:
     )
     time_key = (not route["time_complete"] or bool(route["unmodeled_legs"]), duration)
     if optimize == "fastest":
-        return *time_key, transfers, risk, *price_key
+        return not is_executable(route), *time_key, transfers, risk, *price_key
     if optimize == "cheapest":
-        return *price_key, duration, transfers, risk
+        return not is_executable(route), *price_key, duration, transfers, risk
     if optimize == "fewest-transfers":
         return (
+            not is_executable(route),
             not route["time_complete"] or bool(route["unmodeled_legs"]),
             transfers,
             duration,
             risk,
             *price_key,
         )
-    return route["_balanced_score"], duration, transfers, *price_key, risk
+    return (
+        not is_executable(route),
+        route["_balanced_score"],
+        duration,
+        transfers,
+        *price_key,
+        risk,
+    )
 
 
 def label_routes(routes: list[dict[str, Any]], pareto: set[str], optimize: str) -> None:
     time_complete = [
         route
         for route in routes
-        if route["time_complete"] and not route["unmodeled_legs"]
+        if route["time_complete"]
+        and not route["unmodeled_legs"]
+        and is_executable(route)
     ]
     min_duration = (
         min(float(route["duration_minutes"]) for route in time_complete)
@@ -238,7 +414,9 @@ def label_routes(routes: list[dict[str, Any]], pareto: set[str], optimize: str) 
     priced = [
         route
         for route in routes
-        if route["price_complete"] and route["price_cny_per_person"] is not None
+        if route["price_complete"]
+        and route["price_cny_per_person"] is not None
+        and is_executable(route)
     ]
     min_price = (
         min(float(route["price_cny_per_person"]) for route in priced)
@@ -255,6 +433,7 @@ def label_routes(routes: list[dict[str, Any]], pareto: set[str], optimize: str) 
             labels.append("fastest")
         if (
             min_price is not None
+            and is_executable(route)
             and route["price_complete"]
             and route["price_cny_per_person"] == min_price
         ):
@@ -275,6 +454,9 @@ def label_routes(routes: list[dict[str, Any]], pareto: set[str], optimize: str) 
             "time_complete": route["time_complete"],
             "unpriced_legs": route["unpriced_legs"],
             "unmodeled_legs": route["unmodeled_legs"],
+            "executable": is_executable(route),
+            "inventory_status": route.get("inventory_status", "available"),
+            "duration_complete": route.get("duration_complete", route["time_complete"]),
         }
         if optimize == "balanced":
             route["ranking"]["balanced_score"] = route["_balanced_score"]

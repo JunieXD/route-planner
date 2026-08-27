@@ -26,6 +26,7 @@ USER_AGENT = (
 WWW_HOME = "https://www.12306.cn/index/"
 KYFW_BASE = "https://kyfw.12306.cn"
 SALE_TIME_URL = "https://www.12306.cn/index/otn/index12306/queryAllCacheSaleTime"
+TRAIN_STOPS_URL = f"{KYFW_BASE}/otn/czxx/queryByTrainNo"
 CACHE_PATH = Path(tempfile.gettempdir()) / "codex-china-route-planner" / "stations.json"
 CHINA_TZ = timezone(timedelta(hours=8))
 
@@ -169,6 +170,7 @@ class PublicSession:
         self.opener = build_opener(HTTPCookieProcessor(self.cookies))
         self.last_request_at = 0.0
         self.query_path = "/otn/leftTicket/queryG"
+        self.train_stop_cache: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
 
     def request_text(
         self,
@@ -483,6 +485,116 @@ def query_train_pair(
     return trains, origin, destination, origin_scope, destination_scope
 
 
+def parse_train_stops(
+    payload: dict[str, Any], stations: list[Station]
+) -> list[dict[str, Any]]:
+    data = payload.get("data")
+    rows = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        messages = payload.get("messages") or "missing data.data"
+        raise UpstreamError(f"12306 train-stop query unavailable: {messages}")
+    station_by_name = {normalize_name(item.name): item for item in stations}
+    stops: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("station_name"):
+            continue
+        station = station_by_name.get(normalize_name(str(row["station_name"])))
+        stops.append(
+            {
+                "station_name": str(row["station_name"]),
+                "station_code": station.code if station else None,
+                "station_no": str(row.get("station_no", "")),
+                "arrive_time": str(row.get("arrive_time", "----")),
+                "start_time": str(row.get("start_time", "----")),
+                "stopover_time": str(row.get("stopover_time", "")),
+            }
+        )
+    if not stops:
+        raise UpstreamError("12306 train-stop query returned no stops")
+    return stops
+
+
+def add_stop_datetimes(
+    stops: list[dict[str, Any]], *, anchor_station_no: str, anchor_departure_at: str
+) -> list[dict[str, Any]]:
+    """Attach real dates to clock-only stop rows using a known service departure."""
+    base = datetime(2000, 1, 1, tzinfo=CHINA_TZ)
+    previous: datetime | None = None
+    timed: list[dict[str, Any]] = []
+    for stop in stops:
+        item = dict(stop)
+        for source_field, output_field in (
+            ("arrive_time", "arrival_at"),
+            ("start_time", "departure_at"),
+        ):
+            clock = str(stop.get(source_field, ""))
+            if not re.fullmatch(r"\d{2}:\d{2}", clock):
+                item[output_field] = None
+                continue
+            hour, minute = map(int, clock.split(":"))
+            event = base.replace(hour=hour, minute=minute)
+            while previous is not None and event < previous:
+                event += timedelta(days=1)
+            item[output_field] = event
+            previous = event
+        timed.append(item)
+
+    anchor = next(
+        (item for item in timed if str(item.get("station_no")) == anchor_station_no),
+        None,
+    )
+    if not anchor or not isinstance(anchor.get("departure_at"), datetime):
+        raise UpstreamError(
+            f"train-stop response lacks anchor departure at station {anchor_station_no}"
+        )
+    offset = datetime.fromisoformat(anchor_departure_at) - anchor["departure_at"]
+    for item in timed:
+        for field in ("arrival_at", "departure_at"):
+            value = item.get(field)
+            item[field] = (
+                (value + offset).isoformat(timespec="minutes")
+                if isinstance(value, datetime)
+                else None
+            )
+    return timed
+
+
+def query_train_stops(
+    session: PublicSession,
+    *,
+    train: dict[str, Any],
+    stations: list[Station],
+) -> list[dict[str, Any]]:
+    departure_date = str(train["departure_at"])[:10]
+    cache_key = (
+        str(train["train_no"]),
+        str(train["from_station_code"]),
+        departure_date,
+    )
+    cached = session.train_stop_cache.get(cache_key)
+    if cached is not None:
+        return [dict(item) for item in cached]
+    params = urlencode(
+        {
+            "train_no": train["train_no"],
+            "from_station_telecode": train["from_station_code"],
+            "to_station_telecode": train["to_station_code"],
+            "depart_date": departure_date,
+        }
+    )
+    payload = session.request_json(
+        f"{TRAIN_STOPS_URL}?{params}",
+        headers={"Referer": f"{KYFW_BASE}/otn/czxx/init"},
+    )
+    stops = add_stop_datetimes(
+        parse_train_stops(payload, stations),
+        anchor_station_no=str(train["from_station_no"]),
+        anchor_departure_at=str(train["departure_at"]),
+    )
+    session.train_stop_cache[cache_key] = stops
+    return [dict(item) for item in stops]
+
+
 def allowed_seat_names(policy: str, named: set[str]) -> set[str] | None:
     if policy == "seat-only":
         return SEATED_SEATS
@@ -557,6 +669,49 @@ def station_codes_for_query(query: str, stations: list[Station]) -> set[str]:
     }
 
 
+def load_cross_station_rules(
+    path: Path | None, stations: list[Station]
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Load externally verified station-to-station ground connections."""
+    if path is None:
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    rows = payload.get("rules") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        raise ValueError("cross-station rule file must be an array or {rules: [...]}")
+    rules: dict[tuple[str, str], dict[str, Any]] = {}
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"cross-station rule {index} is not an object")
+        try:
+            origin = resolve_station(str(row["from_station"]), stations)
+            destination = resolve_station(str(row["to_station"]), stations)
+            duration = int(row["duration_minutes"])
+            price = float(row["price_cny"])
+            source = str(row["source"]).strip()
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"cross-station rule {index} requires resolvable stations, "
+                "positive duration_minutes, non-negative price_cny and source"
+            ) from error
+        if duration <= 0 or price < 0 or not source:
+            raise ValueError(
+                f"cross-station rule {index} has invalid duration, price or source"
+            )
+        buffer = int(row.get("buffer_minutes", 0))
+        if buffer < 0:
+            raise ValueError(f"cross-station rule {index} has a negative buffer")
+        rules[(origin.code, destination.code)] = {
+            "duration_minutes": duration,
+            "buffer_minutes": buffer,
+            "price_cny": price,
+            "source": source,
+            "verified_at": row.get("verified_at"),
+            "notes": row.get("notes", []),
+        }
+    return rules
+
+
 def transfer_between(
     previous: dict[str, Any],
     following: dict[str, Any],
@@ -566,6 +721,7 @@ def transfer_between(
     same_station_min: int,
     cross_station_min: int,
     max_wait: int,
+    cross_station_rules: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     previous_arrival = datetime.fromisoformat(str(previous["arrival_at"]))
     following_departure = datetime.fromisoformat(str(following["departure_at"]))
@@ -574,23 +730,28 @@ def transfer_between(
     if same_station:
         required = same_station_min
         kind = "same_station"
+        connection: dict[str, Any] | None = None
     else:
         if not allow_cross_station:
             return None
-        arrival_station = station_by_code.get(str(previous["to_station_code"]))
-        departure_station = station_by_code.get(str(following["from_station_code"]))
-        if not arrival_station or not departure_station:
+        pair = (
+            str(previous["to_station_code"]),
+            str(following["from_station_code"]),
+        )
+        rule = (cross_station_rules or {}).get(pair)
+        if rule is None:
             return None
-        if normalize_name(arrival_station.city) != normalize_name(
-            departure_station.city
-        ):
-            return None
-        required = cross_station_min
+        connection = dict(rule)
+        required = (
+            int(rule["duration_minutes"])
+            + int(rule.get("buffer_minutes", 0))
+            + cross_station_min
+        )
         kind = "cross_station"
     if wait < required or wait > max_wait:
         return None
     slack = wait - required
-    return {
+    result = {
         "kind": kind,
         "from_station": previous["to_station"],
         "to_station": following["from_station"],
@@ -599,6 +760,10 @@ def transfer_between(
         "slack_minutes": slack,
         "risk": "high" if slack < 15 else "medium" if slack < 35 else "low",
     }
+    if connection is not None:
+        result["connection"] = connection
+        result["connection"]["required_minutes_with_buffer"] = required
+    return result
 
 
 def is_overnight(departure_at: str, arrival_at: str) -> bool:
@@ -615,19 +780,45 @@ def is_overnight(departure_at: str, arrival_at: str) -> bool:
     return False
 
 
+def overnight_overlap_minutes(departure_at: str, arrival_at: str) -> int:
+    departure = datetime.fromisoformat(departure_at)
+    arrival = datetime.fromisoformat(arrival_at)
+    total = 0
+    night_start = departure.replace(
+        hour=22, minute=0, second=0, microsecond=0
+    ) - timedelta(days=1)
+    while night_start < arrival:
+        night_end = night_start + timedelta(hours=8)
+        overlap_start = max(departure, night_start)
+        overlap_end = min(arrival, night_end)
+        if overlap_end > overlap_start:
+            total += int((overlap_end - overlap_start).total_seconds() // 60)
+        night_start += timedelta(days=1)
+    return total
+
+
 def itinerary_from_path(
     path: list[dict[str, Any]], transfers: list[dict[str, Any]]
 ) -> dict[str, Any]:
     selected = [leg.get("selected_seat") for leg in path]
-    price_complete = all(
+    rail_price_complete = all(
         isinstance(seat, dict) and seat.get("price_cny") is not None
         for seat in selected
     )
+    connection_prices = [
+        item.get("connection", {}).get("price_cny")
+        for item in transfers
+        if item.get("kind") == "cross_station"
+    ]
+    connections_price_complete = all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in connection_prices
+    )
+    price_complete = rail_price_complete and connections_price_complete
     price = (
         round(
-            sum(
-                float(seat["price_cny"]) for seat in selected if isinstance(seat, dict)
-            ),
+            sum(float(seat["price_cny"]) for seat in selected if isinstance(seat, dict))
+            + sum(float(value) for value in connection_prices),
             2,
         )
         if price_complete
@@ -671,6 +862,36 @@ def itinerary_from_path(
     else:
         overnight_class = "seated"
         comfort_notes = ["夜间行程未选择卧铺"]
+    overnight_seated_minutes = sum(
+        overnight_overlap_minutes(str(leg["departure_at"]), str(leg["arrival_at"]))
+        for index, leg in enumerate(path)
+        if not (
+            isinstance(selected[index], dict)
+            and str(selected[index].get("name")) in SLEEPER_SEATS
+        )
+    )
+    connection_minutes = sum(
+        int(item.get("connection", {}).get("duration_minutes", 0)) for item in transfers
+    )
+    waiting_minutes = sum(
+        max(
+            0,
+            int(item["wait_minutes"])
+            - int(item.get("connection", {}).get("duration_minutes", 0)),
+        )
+        for item in transfers
+    )
+    risk_levels = {"low": 0, "medium": 1, "high": 2}
+    worst_risk = max(
+        (str(item.get("risk", "low")) for item in transfers),
+        key=lambda value: risk_levels.get(value, 2),
+        default="low",
+    )
+    burden_points = (
+        len(transfers)
+        + sum(item.get("kind") == "cross_station" for item in transfers)
+        + sum(int(item["wait_minutes"]) >= 180 for item in transfers)
+    )
     return {
         "id": "/".join(
             f"{leg['train_code']}:{leg['from_station_code']}-{leg['to_station_code']}"
@@ -680,7 +901,15 @@ def itinerary_from_path(
         "departure_at": departure_at,
         "arrival_at": arrival_at,
         "duration_minutes": duration,
+        "scheduled_span_minutes": duration,
         "train_duration_minutes": sum(int(leg["duration_minutes"]) for leg in path),
+        "in_vehicle_minutes": sum(int(leg["duration_minutes"]) for leg in path),
+        "waiting_minutes": waiting_minutes,
+        "checkin_buffer_minutes": 0,
+        "local_connection_minutes": connection_minutes,
+        "door_to_door_duration_minutes": None,
+        "unknown_origin_connection": True,
+        "duration_complete": False,
         "transfer_count": len(path) - 1,
         "minimum_connection_slack_minutes": min(
             (int(item["slack_minutes"]) for item in transfers), default=None
@@ -688,7 +917,16 @@ def itinerary_from_path(
         "price_cny_per_person": price,
         "price_complete": price_complete,
         "inventory_confirmed": inventory_confirmed,
+        "inventory_status": (
+            "available" if inventory_confirmed else "quoted_or_unavailable"
+        ),
+        "executable": inventory_confirmed,
+        "connection_reliability": f"{worst_risk}_risk",
+        "transfer_burden": (
+            "high" if burden_points >= 4 else "medium" if burden_points >= 2 else "low"
+        ),
         "overnight_class": overnight_class,
+        "overnight_seated_minutes": overnight_seated_minutes,
         "comfort_notes": comfort_notes,
         "transfers": transfers,
         "legs": path,
@@ -709,6 +947,7 @@ def search_transfer_graph(
     beam_width: int = 2000,
     candidate_limit: int = 5000,
     search_stats: dict[str, Any] | None = None,
+    cross_station_rules: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Search a pre-fetched timetable graph; kept pure for offline verification."""
     unique_graph = list(
@@ -777,6 +1016,7 @@ def search_transfer_graph(
                 same_station_min=same_station_min,
                 cross_station_min=cross_station_min,
                 max_wait=max_wait,
+                cross_station_rules=cross_station_rules,
             )
             if not transfer:
                 continue
@@ -801,6 +1041,68 @@ def search_transfer_graph(
             }
         )
     return list({str(item["id"]): item for item in completed}.values())
+
+
+def common_transfer_stops(
+    first_train: dict[str, Any],
+    first_stops: list[dict[str, Any]],
+    second_train: dict[str, Any],
+    second_stops: list[dict[str, Any]],
+    *,
+    excluded_codes: set[str],
+    same_station_min: int,
+    max_wait: int,
+) -> list[dict[str, Any]]:
+    """Find ordered, timetable-feasible common stops for a two-train service pair."""
+    first_from_no = int(first_train["from_station_no"])
+    second_to_no = int(second_train["to_station_no"])
+    first_by_code = {
+        str(stop["station_code"]): stop
+        for stop in first_stops
+        if stop.get("station_code")
+        and str(stop["station_code"]) not in excluded_codes
+        and str(stop.get("station_no", "")).isdigit()
+        and int(stop["station_no"]) > first_from_no
+        and stop.get("arrival_at")
+    }
+    candidates: list[dict[str, Any]] = []
+    for second in second_stops:
+        code = str(second.get("station_code") or "")
+        if (
+            not code
+            or code in excluded_codes
+            or code not in first_by_code
+            or not str(second.get("station_no", "")).isdigit()
+            or int(second["station_no"]) >= second_to_no
+            or not second.get("departure_at")
+        ):
+            continue
+        first = first_by_code[code]
+        wait = int(
+            (
+                datetime.fromisoformat(str(second["departure_at"]))
+                - datetime.fromisoformat(str(first["arrival_at"]))
+            ).total_seconds()
+            // 60
+        )
+        if same_station_min <= wait <= max_wait:
+            candidates.append(
+                {
+                    "station_name": first["station_name"],
+                    "station_code": code,
+                    "first_arrival_at": first["arrival_at"],
+                    "second_departure_at": second["departure_at"],
+                    "wait_minutes": wait,
+                    "slack_minutes": wait - same_station_min,
+                }
+            )
+    candidates.sort(
+        key=lambda item: (
+            str(item["first_arrival_at"]),
+            str(item["station_name"]),
+        )
+    )
+    return candidates
 
 
 def command_station(args: argparse.Namespace, session: PublicSession) -> dict[str, Any]:
@@ -937,6 +1239,10 @@ def command_transfer(
         raise ValueError("--hub-limit must be positive")
     if args.query_budget <= 0:
         raise ValueError("--query-budget must be positive")
+    if args.stop_query_budget < 0 or args.refinement_pair_limit < 0:
+        raise ValueError("stop-query and refinement limits must be non-negative")
+    if args.refinement_candidate_limit < 0:
+        raise ValueError("--refinement-candidate-limit must be non-negative")
     if args.beam_width <= 0 or args.candidate_limit <= 0:
         raise ValueError("--beam-width and --candidate-limit must be positive")
     if args.limit < 0:
@@ -956,6 +1262,7 @@ def command_transfer(
     origin_codes = station_codes_for_query(args.from_name, stations)
     destination_codes = station_codes_for_query(args.to_name, stations)
     station_by_code = {station.code: station for station in stations}
+    cross_station_rules = load_cross_station_rules(args.cross_station_rules, stations)
     session.initialize_rail()
 
     requested_hubs = [
@@ -993,11 +1300,15 @@ def command_transfer(
     attempted_pairs: list[dict[str, str]] = []
     failed_pairs: list[dict[str, str]] = []
     budget_exhausted = False
+    pair_cache: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
 
     def fetch_pair(
         from_query: str, to_query: str, date_value: str
     ) -> list[dict[str, Any]]:
         nonlocal budget_exhausted
+        cache_key = (date_value, from_query, to_query)
+        if cache_key in pair_cache:
+            return pair_cache[cache_key]
         if len(attempted_pairs) >= args.query_budget:
             budget_exhausted = True
             return []
@@ -1010,6 +1321,7 @@ def command_transfer(
                 to_query=to_query,
                 stations=stations,
             )
+            pair_cache[cache_key] = trains
             return trains
         except Exception as error:
             failed_pairs.append(
@@ -1020,6 +1332,7 @@ def command_transfer(
                     "error": str(error),
                 }
             )
+            pair_cache[cache_key] = []
             return []
 
     first_date = travel_date.isoformat()
@@ -1110,7 +1423,180 @@ def command_transfer(
         beam_width=args.beam_width,
         candidate_limit=args.candidate_limit,
         search_stats=graph_search_stats,
+        cross_station_rules=cross_station_rules,
     )
+
+    refinement_stats: dict[str, Any] = {
+        "enabled": not args.no_stop_refinement and args.max_transfers >= 1,
+        "stop_query_budget": args.stop_query_budget,
+        "stop_queries": 0,
+        "stop_query_failures": 0,
+        "train_pairs_considered": 0,
+        "common_stop_candidates": 0,
+        "refinement_attempts": 0,
+        "refinement_successes": 0,
+        "refinement_failures": 0,
+        "truncated": False,
+    }
+    queried_stop_keys: set[tuple[str, str, str]] = set()
+
+    def fetch_stops(train: dict[str, Any]) -> list[dict[str, Any]] | None:
+        key = (
+            str(train["train_no"]),
+            str(train["from_station_no"]),
+            str(train["departure_at"]),
+        )
+        if key in queried_stop_keys:
+            return query_train_stops(session, train=train, stations=stations)
+        if len(queried_stop_keys) >= args.stop_query_budget:
+            refinement_stats["truncated"] = True
+            return None
+        queried_stop_keys.add(key)
+        refinement_stats["stop_queries"] += 1
+        try:
+            return query_train_stops(session, train=train, stations=stations)
+        except Exception:
+            refinement_stats["stop_query_failures"] += 1
+            return None
+
+    def seed_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        price = item.get("price_cny_per_person")
+        price_key = float(price) if price is not None else float("inf")
+        if args.sort == "price":
+            return (
+                not item["inventory_confirmed"],
+                price_key,
+                item["duration_minutes"],
+            )
+        if args.sort in {"duration", "arrival"}:
+            return (
+                not item["inventory_confirmed"],
+                item["duration_minutes"],
+                price_key,
+            )
+        return (
+            not item["inventory_confirmed"],
+            item["duration_minutes"] + price_key,
+            price_key,
+        )
+
+    if refinement_stats["enabled"] and args.refinement_pair_limit:
+        seen_train_pairs: set[tuple[str, str, str, str]] = set()
+        seeds: list[dict[str, Any]] = []
+        for itinerary in sorted(itineraries, key=seed_key):
+            legs = itinerary.get("legs", [])
+            if len(legs) != 2:
+                continue
+            pair_key = (
+                str(legs[0]["train_no"]),
+                str(legs[0]["departure_at"]),
+                str(legs[1]["train_no"]),
+                str(legs[1]["departure_at"]),
+            )
+            if pair_key in seen_train_pairs:
+                continue
+            seen_train_pairs.add(pair_key)
+            seeds.append(itinerary)
+            if len(seeds) >= args.refinement_pair_limit:
+                break
+
+        refinement_attempt_limit_hit = False
+        for seed in seeds:
+            refinement_stats["train_pairs_considered"] += 1
+            first, second = seed["legs"]
+            first_stops = fetch_stops(first)
+            second_stops = fetch_stops(second)
+            if first_stops is None or second_stops is None:
+                continue
+            common = common_transfer_stops(
+                first,
+                first_stops,
+                second,
+                second_stops,
+                excluded_codes=origin_codes | destination_codes,
+                same_station_min=args.same_station_min,
+                max_wait=args.max_wait,
+            )
+            refinement_stats["common_stop_candidates"] += len(common)
+            for common_stop in common:
+                if (
+                    refinement_stats["refinement_attempts"]
+                    >= args.refinement_candidate_limit
+                ):
+                    refinement_attempt_limit_hit = True
+                    break
+                refinement_stats["refinement_attempts"] += 1
+                station_name = str(common_stop["station_name"])
+                station_code = str(common_stop["station_code"])
+                first_options = fetch_pair(
+                    args.from_name,
+                    station_name,
+                    str(first["departure_at"])[:10],
+                )
+                second_options = fetch_pair(
+                    station_name,
+                    args.to_name,
+                    str(common_stop["second_departure_at"])[:10],
+                )
+                if budget_exhausted:
+                    refinement_stats["truncated"] = True
+                    refinement_attempt_limit_hit = True
+                    break
+                refined_first = next(
+                    (
+                        item
+                        for item in first_options
+                        if item["train_no"] == first["train_no"]
+                        and str(item["to_station_code"]) == station_code
+                        and str(item["from_station_code"]) in origin_codes
+                    ),
+                    None,
+                )
+                refined_second = next(
+                    (
+                        item
+                        for item in second_options
+                        if item["train_no"] == second["train_no"]
+                        and str(item["from_station_code"]) == station_code
+                        and str(item["to_station_code"]) in destination_codes
+                    ),
+                    None,
+                )
+                refined_legs: list[dict[str, Any]] = []
+                for leg in (refined_first, refined_second):
+                    if leg is None:
+                        break
+                    selected = select_seat(
+                        leg,
+                        policy=args.seat_policy,
+                        named=named_seats,
+                        available_only=args.available_only,
+                    )
+                    if selected is None:
+                        break
+                    refined_legs.append({**leg, "selected_seat": selected})
+                if len(refined_legs) != 2:
+                    refinement_stats["refinement_failures"] += 1
+                    continue
+                transfer = transfer_between(
+                    refined_legs[0],
+                    refined_legs[1],
+                    station_by_code=station_by_code,
+                    allow_cross_station=False,
+                    same_station_min=args.same_station_min,
+                    cross_station_min=args.cross_station_min,
+                    max_wait=args.max_wait,
+                )
+                if transfer is None:
+                    refinement_stats["refinement_failures"] += 1
+                    continue
+                itineraries.append(itinerary_from_path(refined_legs, [transfer]))
+                refinement_stats["refinement_successes"] += 1
+            if refinement_attempt_limit_hit:
+                refinement_stats["truncated"] = True
+                break
+
+    itineraries = list({str(item["id"]): item for item in itineraries}.values())
     if args.arrive_before:
         deadline = datetime.fromisoformat(f"{args.arrive_before}:00+08:00")
         itineraries = [
@@ -1122,6 +1608,7 @@ def command_transfer(
     if args.sort == "price":
         itineraries.sort(
             key=lambda item: (
+                not item["executable"],
                 not item["price_complete"],
                 item["price_cny_per_person"]
                 if item["price_cny_per_person"] is not None
@@ -1131,13 +1618,24 @@ def command_transfer(
         )
     elif args.sort == "arrival":
         itineraries.sort(
-            key=lambda item: (item["arrival_at"], item["duration_minutes"])
+            key=lambda item: (
+                not item["executable"],
+                item["arrival_at"],
+                item["duration_minutes"],
+            )
         )
     elif args.sort == "departure":
-        itineraries.sort(key=lambda item: (item["departure_at"], item["arrival_at"]))
+        itineraries.sort(
+            key=lambda item: (
+                not item["executable"],
+                item["departure_at"],
+                item["arrival_at"],
+            )
+        )
     elif args.sort == "balanced":
         itineraries.sort(
             key=lambda item: (
+                not item["executable"],
                 item["duration_minutes"]
                 + 45 * item["transfer_count"]
                 + (0 if item["inventory_confirmed"] else 120)
@@ -1150,6 +1648,7 @@ def command_transfer(
     else:
         itineraries.sort(
             key=lambda item: (
+                not item["executable"],
                 item["duration_minutes"],
                 item["transfer_count"],
                 item["price_cny_per_person"]
@@ -1172,13 +1671,16 @@ def command_transfer(
         or middle_truncated
         or bool(failed_pairs)
         or bool(graph_search_stats.get("truncated"))
+        or bool(refinement_stats.get("truncated"))
     )
     if failed_pairs:
         warnings.append(f"{len(failed_pairs)} 个铁路路段查询失败，搜索覆盖不完整")
     if args.max_transfers >= 1:
         warnings.append(
-            "换乘结果来自有界枢纽搜索，只能称为“已查最低/最快”，不能称为全网绝对最优"
+            "换乘结果来自有界枢纽搜索和经停站细化，只能称为“已查最低/最快”，不能称为全网绝对最优"
         )
+    if args.allow_cross_station and not cross_station_rules:
+        warnings.append("未提供已验证跨站接驳规则，跨站候选已排除")
     if any(not item["inventory_confirmed"] for item in itineraries):
         warnings.append("部分候选仅有票价或非可售状态，出行前需复核余票")
 
@@ -1196,7 +1698,7 @@ def command_transfer(
         "queried_at": now_iso(),
         "source": "12306-public",
         "search_coverage": {
-            "strategy": "bounded_hub_graph",
+            "strategy": "bounded_hub_graph_with_stop_refinement",
             "complete": args.max_transfers == 0 and not coverage_truncated,
             "minimum_claim": (
                 "direct_query_complete"
@@ -1216,6 +1718,7 @@ def command_transfer(
             "truncated": coverage_truncated,
             "candidate_count_before_limit": total_candidates,
             "graph_search": graph_search_stats,
+            "stop_refinement": refinement_stats,
         },
         "warnings": warnings,
         "count": len(itineraries),
@@ -1267,8 +1770,21 @@ def build_parser() -> argparse.ArgumentParser:
     transfer.add_argument("--to", dest="to_name", required=True)
     transfer.add_argument("--max-transfers", type=int, choices=[0, 1, 2], default=1)
     transfer.add_argument("--allow-cross-station", action="store_true")
+    transfer.add_argument(
+        "--cross-station-rules",
+        type=Path,
+        help=(
+            "JSON file of verified cross-station ground connections; "
+            "--allow-cross-station alone never assumes feasibility"
+        ),
+    )
     transfer.add_argument("--same-station-min", type=int, default=30)
-    transfer.add_argument("--cross-station-min", type=int, default=100)
+    transfer.add_argument(
+        "--cross-station-min",
+        type=int,
+        default=30,
+        help="Extra buffer after a verified cross-station ground connection",
+    )
     transfer.add_argument(
         "--max-wait", type=int, default=720, help="Maximum transfer wait in minutes"
     )
@@ -1279,8 +1795,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Comma-separated hub city/station list replacing the built-in bounded list"
         ),
     )
-    transfer.add_argument("--hub-limit", type=int, default=20)
-    transfer.add_argument("--query-budget", type=int, default=80)
+    transfer.add_argument("--hub-limit", type=int, default=len(DEFAULT_TRANSFER_HUBS))
+    transfer.add_argument("--query-budget", type=int, default=120)
+    transfer.add_argument("--stop-query-budget", type=int, default=16)
+    transfer.add_argument("--refinement-pair-limit", type=int, default=8)
+    transfer.add_argument("--refinement-candidate-limit", type=int, default=16)
+    transfer.add_argument(
+        "--no-stop-refinement",
+        action="store_true",
+        help="Disable common-stop discovery and segment repricing",
+    )
     transfer.add_argument("--beam-width", type=int, default=2000)
     transfer.add_argument("--candidate-limit", type=int, default=5000)
     transfer.add_argument("--depart-after", type=parse_hhmm)

@@ -9,14 +9,17 @@ Use `scripts/rail_12306.py` first.
 - Session initialization: `https://kyfw.12306.cn/otn/leftTicket/init`
 - Direct trains: the path is discovered from `CLeftTicketUrl`; common values include `/otn/leftTicket/queryG` and `/otn/leftTicket/query`.
 - Ticket prices: `https://kyfw.12306.cn/otn/leftTicket/queryTicketPrice`
+- Train stops: `https://kyfw.12306.cn/otn/czxx/queryByTrainNo`
 - Station names: discover the versioned `station_name*.js` script from `https://www.12306.cn/index/`.
 - Station sale times: `https://www.12306.cn/index/otn/index12306/queryAllCacheSaleTime`
 
 These are public endpoints used by the official website, but they are not a documented developer API with a stability SLA. They need an initialized public Cookie session and can change paths or response fields. Respect rate limits, use a short cache, and do not retry indefinitely. A browser is not required for ordinary public queries.
 
-The login-free direct endpoint does not provide a dependable official transfer-planning result. `rail_12306.py transfer` constructs a bounded timetable graph from direct queries. Its default hub list is broad but not exhaustive; `--hubs` can replace it, and query/beam limits may truncate two-transfer exploration. Always retain `search_coverage` in analysis and never promote `lowest_among_searched_candidates` to a network-wide optimum.
+The login-free direct endpoint does not provide a dependable official transfer-planning result. `rail_12306.py transfer` constructs a bounded timetable graph from direct queries. It then queries the full stop sequences of promising two-train pairs, intersects ordered stops, checks dated connection times, and requeries each segment so an intermediate regional station can compete on actual fare and inventory. This is still bounded: its default seed hubs are broad but not exhaustive, while hub, direct-query, stop-query, refinement and beam limits can truncate exploration. Always retain `search_coverage` in analysis and never promote `lowest_among_searched_candidates` to a network-wide optimum.
 
-Transfer search distinguishes a named station from a city-wide query, checks cross-midnight datetimes, and applies separate same-station and same-city cross-station minimums. Cross-station transfer is opt-in because the adapter does not calculate the road journey between railway stations. Seat policy also matters: `cheapest-available` uses currently available inventory; `sleeper-required` requires a sleeper on railway legs that actually cross the 22:00–06:00 window while keeping daytime feeder legs economical. Quoted-but-unavailable prices must be described as a preview.
+Transfer search distinguishes a named station from a city-wide query and checks cross-midnight datetimes and minimum same-station margins. Administrative city equality is not evidence of a feasible cross-station transfer. Cross-station candidates require both `--allow-cross-station` and a `--cross-station-rules` JSON file whose directed rules provide `from_station`, `to_station`, `duration_minutes`, `price_cny`, `source`, and optional `buffer_minutes` / `verified_at`. Obtain those values from a real local route query; without a matching rule the candidate is excluded. The ground time, fare and buffer are included in the itinerary.
+
+Seat policy also matters: `cheapest-available` uses currently available inventory; `sleeper-required` requires a sleeper on railway legs that actually cross the 22:00–06:00 window while keeping daytime feeder legs economical. Quoted-but-unavailable prices are a separate preview and are not executable recommendations.
 
 Rail responses are snapshots. A missing target date can mean the date is outside the sale window, the timetable is unpublished, or the upstream request failed. Preserve those distinctions.
 

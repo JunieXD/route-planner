@@ -230,6 +230,8 @@ class RailTransferTests(unittest.TestCase):
             "departure_at": departure,
             "arrival_at": arrival,
             "duration_minutes": duration,
+            "from_station_no": "01",
+            "to_station_no": "02",
             "seats": [
                 {
                     "name": seat,
@@ -282,7 +284,7 @@ class RailTransferTests(unittest.TestCase):
             rail_12306.is_overnight("2026-09-11T00:40+08:00", "2026-09-11T05:30+08:00")
         )
 
-    def test_cross_station_transfer_requires_same_city_and_explicit_permission(
+    def test_cross_station_transfer_requires_a_verified_ground_connection(
         self,
     ) -> None:
         stations = {
@@ -313,13 +315,147 @@ class RailTransferTests(unittest.TestCase):
             station_by_code=stations,
             allow_cross_station=True,
             same_station_min=30,
-            cross_station_min=100,
+            cross_station_min=20,
             max_wait=720,
+            cross_station_rules={
+                ("H1", "H2"): {
+                    "duration_minutes": 60,
+                    "buffer_minutes": 10,
+                    "price_cny": 8,
+                    "source": "verified-fixture",
+                }
+            },
         )
 
         self.assertIsNone(denied)
         self.assertEqual(allowed["kind"], "cross_station")
-        self.assertEqual(allowed["slack_minutes"], 20)
+        self.assertEqual(allowed["slack_minutes"], 30)
+        self.assertEqual(allowed["connection"]["price_cny"], 8)
+
+        unsafe_same_city = rail_12306.transfer_between(
+            first,
+            second,
+            station_by_code=stations,
+            allow_cross_station=True,
+            same_station_min=30,
+            cross_station_min=20,
+            max_wait=720,
+        )
+        self.assertIsNone(unsafe_same_city)
+
+    def test_stop_datetimes_roll_over_midnight(self) -> None:
+        stops = [
+            {
+                "station_name": "甲",
+                "station_code": "A",
+                "station_no": "01",
+                "arrive_time": "----",
+                "start_time": "23:50",
+            },
+            {
+                "station_name": "乙",
+                "station_code": "B",
+                "station_no": "02",
+                "arrive_time": "00:20",
+                "start_time": "00:25",
+            },
+        ]
+
+        timed = rail_12306.add_stop_datetimes(
+            stops,
+            anchor_station_no="01",
+            anchor_departure_at="2026-09-10T23:50+08:00",
+        )
+
+        self.assertEqual(timed[1]["arrival_at"], "2026-09-11T00:20+08:00")
+
+    def test_common_stop_discovery_checks_station_order_and_timing(self) -> None:
+        first = {
+            "from_station_no": "01",
+            "to_station_no": "04",
+        }
+        second = {
+            "from_station_no": "01",
+            "to_station_no": "05",
+        }
+        first_stops = [
+            {
+                "station_name": "甲",
+                "station_code": "A",
+                "station_no": "01",
+                "arrival_at": None,
+            },
+            {
+                "station_name": "中间一",
+                "station_code": "H1",
+                "station_no": "02",
+                "arrival_at": "2026-09-10T10:00+08:00",
+            },
+            {
+                "station_name": "中间二",
+                "station_code": "H2",
+                "station_no": "03",
+                "arrival_at": "2026-09-10T12:00+08:00",
+            },
+        ]
+        second_stops = [
+            {
+                "station_name": "中间二",
+                "station_code": "H2",
+                "station_no": "01",
+                "departure_at": "2026-09-10T11:00+08:00",
+            },
+            {
+                "station_name": "中间一",
+                "station_code": "H1",
+                "station_no": "02",
+                "departure_at": "2026-09-10T11:30+08:00",
+            },
+            {
+                "station_name": "终点后共同站",
+                "station_code": "H3",
+                "station_no": "06",
+                "departure_at": "2026-09-10T16:00+08:00",
+            },
+        ]
+
+        common = rail_12306.common_transfer_stops(
+            first,
+            first_stops,
+            second,
+            second_stops,
+            excluded_codes={"A", "D"},
+            same_station_min=30,
+            max_wait=240,
+        )
+
+        self.assertEqual([item["station_code"] for item in common], ["H1"])
+
+    def test_itinerary_exposes_span_waiting_and_overnight_burden(self) -> None:
+        first = self.leg(
+            "K1", "A", "H", "2026-09-10T20:00+08:00", "2026-09-10T23:00+08:00"
+        )
+        second = self.leg(
+            "K2", "H", "D", "2026-09-11T01:00+08:00", "2026-09-11T05:00+08:00"
+        )
+        transfer = rail_12306.transfer_between(
+            first,
+            second,
+            station_by_code={},
+            allow_cross_station=False,
+            same_station_min=30,
+            cross_station_min=30,
+            max_wait=720,
+        )
+
+        route = rail_12306.itinerary_from_path([first, second], [transfer])
+
+        self.assertEqual(route["scheduled_span_minutes"], 540)
+        self.assertEqual(route["in_vehicle_minutes"], 420)
+        self.assertEqual(route["waiting_minutes"], 120)
+        self.assertIsNone(route["door_to_door_duration_minutes"])
+        self.assertFalse(route["duration_complete"])
+        self.assertEqual(route["overnight_seated_minutes"], 300)
 
     def test_seat_policies_separate_price_and_overnight_comfort(self) -> None:
         train = {
@@ -493,6 +629,112 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(routes[0]["id"], "complete-twenty")
         self.assertIn("fastest", routes[0]["ranking"]["labels"])
         self.assertNotIn("fastest", routes[1]["ranking"]["labels"])
+
+    def test_sold_out_quote_is_not_recommended_over_available_route(self) -> None:
+        routes = [
+            {
+                "id": "sold-out-five",
+                "duration_minutes": 40,
+                "price_cny_per_person": 5,
+                "price_complete": True,
+                "time_complete": True,
+                "unpriced_legs": [],
+                "unmodeled_legs": [],
+                "transfer_count": 0,
+                "risk_score": 0.1,
+                "inventory_confirmed": False,
+                "executable": False,
+            },
+            {
+                "id": "available-twenty",
+                "duration_minutes": 50,
+                "price_cny_per_person": 20,
+                "price_complete": True,
+                "time_complete": True,
+                "unpriced_legs": [],
+                "unmodeled_legs": [],
+                "transfer_count": 0,
+                "risk_score": 0.1,
+                "inventory_confirmed": True,
+                "executable": True,
+            },
+        ]
+
+        rank_routes.add_balanced_scores(routes)
+        frontier = rank_routes.pareto_ids(routes)
+        routes.sort(key=lambda item: rank_routes.sort_key(item, "cheapest"))
+        rank_routes.label_routes(routes, frontier, "cheapest")
+
+        self.assertEqual(routes[0]["id"], "available-twenty")
+        self.assertIn("cheapest", routes[0]["ranking"]["labels"])
+        self.assertEqual(routes[1]["ranking"]["labels"], [])
+
+    def test_duration_breakdown_is_generated_from_timeline(self) -> None:
+        route = {
+            "recommended_leave_at": "2026-09-10T07:00+08:00",
+            "estimated_arrival_at": "2026-09-10T11:00+08:00",
+            "duration_minutes": 240,
+            "time_complete": True,
+            "unmodeled_legs": [],
+            "legs": [
+                {
+                    "mode": "walk",
+                    "duration_minutes": 15,
+                    "departure_at": "2026-09-10T07:00+08:00",
+                    "arrival_at": "2026-09-10T07:15+08:00",
+                },
+                {"mode": "buffer", "duration_minutes": 30},
+                {
+                    "mode": "rail",
+                    "duration_minutes": 150,
+                    "departure_at": "2026-09-10T07:45+08:00",
+                    "arrival_at": "2026-09-10T10:15+08:00",
+                    "scheduled": True,
+                },
+                {"mode": "wait", "duration_minutes": 10},
+                {"mode": "metro", "duration_minutes": 35},
+            ],
+        }
+
+        rank_routes.apply_service_window_gate(route)
+        rank_routes.apply_duration_breakdown(route)
+
+        self.assertEqual(route["door_to_door_duration_minutes"], 240)
+        self.assertEqual(route["scheduled_span_minutes"], 150)
+        self.assertEqual(route["in_vehicle_minutes"], 185)
+        self.assertEqual(route["waiting_minutes"], 10)
+        self.assertEqual(route["checkin_buffer_minutes"], 30)
+        self.assertEqual(route["local_connection_minutes"], 50)
+        self.assertTrue(route["duration_complete"])
+
+    def test_unverified_first_service_makes_arrival_conditional(self) -> None:
+        route = {
+            "recommended_leave_at": "2026-09-11T05:30+08:00",
+            "estimated_arrival_at": "2026-09-11T06:45+08:00",
+            "duration_minutes": 75,
+            "time_complete": True,
+            "unmodeled_legs": [],
+            "service_window_verified": False,
+            "legs": [
+                {
+                    "mode": "metro",
+                    "departure_at": "2026-09-11T06:00+08:00",
+                    "arrival_at": "2026-09-11T06:40+08:00",
+                    "duration_minutes": 40,
+                }
+            ],
+        }
+
+        rank_routes.apply_service_window_gate(route)
+        rank_routes.apply_duration_breakdown(route)
+
+        self.assertIsNone(route["estimated_arrival_at"])
+        self.assertEqual(
+            route["earliest_if_service_available"], "2026-09-11T06:45+08:00"
+        )
+        self.assertFalse(route["time_complete"])
+        self.assertFalse(route["duration_complete"])
+        self.assertIn("首末班运营时段待确认", route["warnings"])
 
 
 if __name__ == "__main__":
