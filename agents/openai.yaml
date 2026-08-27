@@ -1,0 +1,3 @@
+interface:
+  display_name: "Route Planner"
+  short_description: "比较中国铁路、地铁和公交路线的时间、票价与换乘风险"

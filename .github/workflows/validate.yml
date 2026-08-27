@@ -1,0 +1,28 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile scripts
+        run: python -m py_compile scripts/*.py
+      - name: Run offline tests
+        run: python -m unittest discover -s tests -v
+      - name: Check command interfaces
+        run: |
+          python scripts/rail_12306.py --help
+          python scripts/shanghai_metro.py --help
+          python scripts/amap_transit.py --help
+          python scripts/amap_credentials.py --help
+          python scripts/rank_routes.py --help
