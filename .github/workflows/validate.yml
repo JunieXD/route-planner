@@ -19,6 +19,8 @@ jobs:
         run: python -m py_compile scripts/*.py
       - name: Run offline tests
         run: python -m unittest discover -s tests -v
+      - name: Build installable skill archive
+        run: python .github/scripts/package_skill.py /tmp/route-planner.zip
       - name: Check command interfaces
         run: |
           python scripts/rail_12306.py --help
