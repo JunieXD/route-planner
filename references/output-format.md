@@ -1,42 +1,42 @@
-# Compact user-facing route format
+# 简洁的路线比较格式
 
-Read this file when presenting the final route comparison. The aim is fast visual comparison, not a prose travel diary.
+准备最终答复时阅读本文件。目标是让用户迅速比较方案，而不是写成大段行程叙述。
 
-## Default structure
+## 基本结构
 
-1. Start with one sentence naming the recommendation and why it wins for the user's stated preference.
-2. Show one comparison table with three to five distinct, feasible routes. Prefer these columns:
+1. 开头用一句话说明推荐哪个方案，以及它为何更符合用户的偏好。
+2. 用一张表比较三至五个确有差异且实际可行的方案。优先采用以下列：
 
-   | 方案 | 关键时刻（出门 → 发车 → 到达） | 总耗时 | 费用 | 换乘 / 步行 | 稳妥度 |
+   | 方案 | 关键时刻（出发 → 主要班次 → 到达） | 总耗时 | 费用 | 换乘和步行 | 稳妥程度 |
    |---|---|---:|---:|---|---|
 
-   Put the train number or other main service beside its departure time. Show a complete price as `¥81/人；2人¥162`; show a partial price as `已知¥74/人 + 末段待定`; show unknown amounts as `待查`, never `¥0`. If the origin leg is unmodeled, replace the invented leave time with `HH:MM前到站 + 住处接驳`, and write the duration as `已知18小时13分 + 住处接驳`, not as a complete total.
-3. Under the table, expand the recommended route as a single chronological line, for example: `08:03 出门 → 08:38 到杭州东 → 09:13 Gxxxx → 10:05 到上海南 → 10:42 到目的地`.
-4. Expand at most one additional route when it represents a meaningful tradeoff such as saving money, arriving materially earlier, or avoiding a difficult transfer.
-5. Finish with no more than three compact notes covering shared assumptions, missing costs or uncertainty, and provider/query freshness.
+   主要班次的发车时间旁应写明车次或线路。费用完整时写成 `¥81/人，2人合计¥162`；部分费用未知时写成 `目前已知¥74/人，末段待定`；完全未知时写 `待查询`，不能写 `¥0`。若起点到首站的路段没有数据，不要编造出发时间，应写 `HH:MM前到站，另加住处到车站的时间`；耗时写成 `目前可计算18小时13分，另加住处到车站的时间`，不能写成完整的总耗时。
+3. 表格下方用一条按时间排列的短句展开推荐方案，例如：`08:03 出发 → 08:38 到杭州东 → 09:13 乘Gxxxx → 10:05 到上海南 → 10:42 到目的地`。
+4. 最多再展开一个会明显影响选择的备选方案，例如费用更低、到达时间明显更早，或可以避开较麻烦的换乘。
+5. 最后用不超过三条简短说明，集中交代共同假设、未计费用、尚未确认的信息，以及数据来源和查询时间。
 
-## Information hierarchy
+## 信息顺序
 
-- The three key times must be visible without opening details: recommended door departure, main scheduled departure, and estimated final arrival.
-- Do not present a single train's runtime as the itinerary total. Prefer `门到门18小时50分（车内14小时41分，候车3小时32分）` when the breakdown matters; otherwise keep only the complete total in the table and move the breakdown to the timeline.
-- Use labels such as `推荐`, `最快`, `最省`, and `少换乘`; combine labels when one route wins multiple categories and do not duplicate the route.
-- If search coverage is bounded or truncated, use `已查最快` / `已查最省`. If a route has incomplete time or price, it is ineligible for the corresponding label.
-- Near first/last service boundaries, an unverified point estimate is conditional: show `若首班可乘，最早约07:20` and label it `待确认`, not `预计07:20到`.
-- Express tradeoffs as deltas where possible: `比推荐早到12分钟，贵¥18/人` is easier to compare than repeating both routes.
-- Keep per-leg fares and minor stops in the expanded timeline or notes unless they explain a route's price difference.
-- Put common data sources and query timestamps in one footer instead of repeating them in every row.
+- 用户无需展开详情，就应看到三个关键时刻：建议出发时间、主要班次发车时间和最终到达时间。
+- 单趟列车的运行时间不能作为完整行程的总耗时。需要说明构成时，可写 `全程18小时50分（乘车14小时41分，候车3小时32分）`；否则表格只保留完整的总耗时，在分段时间线中解释其构成。
+- 可以使用 `推荐`、`最快`、`最省`、`少换乘` 等标签。同一方案获得多个标签时合并显示，不要重复列出。
+- 查询范围有限或因次数上限提前停止时，应写 `在已查询方案中用时最短` 或 `在已查询方案中费用最低`。时间或费用不完整的方案不能获得相应标签。
+- 接近首班或末班时，未经核实的到达时间只能作为条件估计。例如写 `若能赶上首班车，最早约07:20到达`，并标注 `待确认`；不能直接写 `预计07:20到达`。
+- 尽量用差额说明取舍。例如，`比推荐方案早到12分钟，每人多花¥18` 比重复列出两组完整数据更容易比较。
+- 各段费用和普通经停站放在分段时间线或说明中；只有当它们能够解释费用差异时，才放进主表。
+- 各方案共用的数据来源和查询时间统一写在表格下方，不要在每一行重复。
 
-## Reliability labels
+## 稳妥程度
 
-- `稳`: all scheduled connections retain the conservative buffer and there is no material unresolved warning.
-- `一般`: feasible but includes ordinary uncertainty such as unscheduled metro waiting or moderate walking.
-- `赶`: a tight connection, cross-station movement, or disruption would plausibly cause a missed fixed service.
-- `待确认`: target inventory is not on sale, a key fare is unknown, or the schedule is stale or provisional.
+- `稳`：所有固定班次之间都留有保守余量，且不存在尚未确认、足以影响出行的重要问题。
+- `一般`：方案可行，但仍有一般性不确定因素，例如地铁候车时间不固定或步行距离较长。
+- `赶`：换乘时间较紧、需要跨站，或轻微延误就可能错过后续固定班次。
+- `待确认`：尚未开售、关键费用未知，或时刻表仍是临时信息。
 
-Do not use a confidence label merely for decoration. State the decisive reason beside `赶` or `待确认`.
+不要把稳妥程度标签当作装饰。标注 `赶` 或 `待确认` 时，应同时写明原因。
 
-## Conditional detail
+## 按需补充的信息
 
-Show first/last-service constraints only when the trip is near service boundaries. Show accessibility, elevator, luggage, child, or elderly-traveler concerns when the user mentions them or when they materially distinguish routes. This keeps the default table clean while preserving important constraints.
+只有行程接近首班或末班时，才展开相关限制。无障碍、电梯、行李、儿童和老人出行等内容，只在用户提出或确实会影响方案选择时说明。
 
-For an overnight request, prefer two decision-relevant rows over many near-duplicates: the lowest verified available fare and the lowest verified sleeper fare. Put `硬座过夜8小时` or `硬卧/动卧` in the burden column, and show the sleeper upgrade delta. Inventory and comfort are separate: a quoted sleeper price with sold-out inventory goes in a clearly separated `仅报价/售罄预览`, not among usable recommendations.
+用户需要夜间乘车时，优先比较两个真正影响选择的方案：当前有票且费用最低的方案，以及当前有票且费用最低的卧铺方案。旅途负担一栏可写 `硬座夜间乘车8小时` 或 `硬卧、动卧`，并说明选择卧铺需要增加多少费用。票价与余票必须分开判断：已经售罄的卧铺只能作为参考方案单独列出，不能列入实际可行的方案。

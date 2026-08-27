@@ -281,9 +281,9 @@ def command_route(args: argparse.Namespace) -> dict[str, Any]:
     hour, minute = map(int, args.time.split(":"))
     requested_minutes = hour * 60 + minute
     if requested_minutes < 360:
-        warnings.append("官方路线结果未提供可核验的首班时刻，清晨接续待确认")
+        warnings.append("官方路线数据无法确认首班车时间，清晨换乘仍需另行核对")
     elif requested_minutes >= 1350:
-        warnings.append("行程接近末班时段，应按返回的末班上车时间逐条复核")
+        warnings.append("所选时间接近末班车，应逐段核对各线路的最晚上车时间")
     return {
         "query": {
             "from": args.from_name,

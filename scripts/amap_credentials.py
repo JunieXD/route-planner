@@ -11,12 +11,17 @@ import subprocess
 import sys
 from typing import Any
 
-
 KEY_ENV = "AMAP_MAPS_API_KEY"
-MACOS_SERVICE = "codex.route-planner.amap-api-key"
-MACOS_LEGACY_SERVICES = ("codex.amap.maps-api-key",)
-WINDOWS_TARGET = "Codex/route-planner/AMAP_MAPS_API_KEY"
-WINDOWS_LEGACY_TARGETS = ("Codex/china-multimodal-route-planner/AMAP_MAPS_API_KEY",)
+MACOS_SERVICE = "route-planner.amap-api-key"
+MACOS_LEGACY_SERVICES = (
+    "codex.route-planner.amap-api-key",
+    "codex.amap.maps-api-key",
+)
+WINDOWS_TARGET = "RoutePlanner/AMAP_MAPS_API_KEY"
+WINDOWS_LEGACY_TARGETS = (
+    "Codex/route-planner/AMAP_MAPS_API_KEY",
+    "Codex/china-multimodal-route-planner/AMAP_MAPS_API_KEY",
+)
 
 
 class CredentialError(RuntimeError):
@@ -52,7 +57,9 @@ def _macos_native_api() -> tuple[Any, Any, Any]:
     import ctypes
 
     security = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
-    core = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    core = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    )
     security.SecKeychainFindGenericPassword.argtypes = [
         ctypes.c_void_p,
         ctypes.c_uint32,
@@ -198,7 +205,9 @@ def write_macos_keychain(key: str) -> None:
             None,
         )
     if status != 0:
-        raise CredentialError(f"macOS Keychain could not store the AMap key (status {status})")
+        raise CredentialError(
+            f"macOS Keychain could not store the AMap key (status {status})"
+        )
 
 
 def delete_macos_keychain() -> bool:
@@ -228,7 +237,9 @@ def delete_macos_keychain() -> bool:
 
 def _windows_api() -> tuple[Any, Any, Any, Any]:
     if os.name != "nt":
-        raise CredentialError("Windows Credential Manager is unavailable on this platform")
+        raise CredentialError(
+            "Windows Credential Manager is unavailable on this platform"
+        )
 
     import ctypes
     from ctypes import wintypes
@@ -417,7 +428,9 @@ def main() -> int:
         return 0
     except Exception as error:
         print(
-            json.dumps({"error": str(error), "type": type(error).__name__}, ensure_ascii=False),
+            json.dumps(
+                {"error": str(error), "type": type(error).__name__}, ensure_ascii=False
+            ),
             file=sys.stderr,
         )
         return 1

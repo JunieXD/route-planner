@@ -11,6 +11,7 @@ from unittest import mock
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import amap_credentials  # noqa: E402
 import amap_transit  # noqa: E402
 import rail_12306  # noqa: E402
 import rank_routes  # noqa: E402
@@ -18,6 +19,20 @@ import shanghai_metro  # noqa: E402
 
 
 class AMapNormalizationTests(unittest.TestCase):
+    def test_new_credential_names_are_agent_neutral_and_legacy_names_remain(
+        self,
+    ) -> None:
+        self.assertNotIn("codex", amap_credentials.MACOS_SERVICE.lower())
+        self.assertNotIn("codex", amap_credentials.WINDOWS_TARGET.lower())
+        self.assertIn(
+            "codex.route-planner.amap-api-key",
+            amap_credentials.MACOS_LEGACY_SERVICES,
+        )
+        self.assertIn(
+            "Codex/route-planner/AMAP_MAPS_API_KEY",
+            amap_credentials.WINDOWS_LEGACY_TARGETS,
+        )
+
     def test_empty_railway_placeholders_are_ignored(self) -> None:
         raw = {
             "duration": "1260",
@@ -734,7 +749,7 @@ class RankingTests(unittest.TestCase):
         )
         self.assertFalse(route["time_complete"])
         self.assertFalse(route["duration_complete"])
-        self.assertIn("首末班运营时段待确认", route["warnings"])
+        self.assertIn("首末班时间待确认", route["warnings"])
 
 
 if __name__ == "__main__":

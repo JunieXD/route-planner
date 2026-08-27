@@ -1,60 +1,62 @@
-# Provider selection and reliability
+# 数据来源的选择与可靠性
 
-Read this file when selecting a data source, diagnosing an upstream failure, or deciding whether a browser fallback is justified.
+选择数据来源、排查接口故障或判断是否需要改用网页查询时，阅读本文件。
 
-## China Railway 12306 public website endpoints
+## 中国铁路 12306 官网公开接口
 
-Use `scripts/rail_12306.py` first.
+优先使用 `scripts/rail_12306.py`。
 
-- Session initialization: `https://kyfw.12306.cn/otn/leftTicket/init`
-- Direct trains: the path is discovered from `CLeftTicketUrl`; common values include `/otn/leftTicket/queryG` and `/otn/leftTicket/query`.
-- Ticket prices: `https://kyfw.12306.cn/otn/leftTicket/queryTicketPrice`
-- Train stops: `https://kyfw.12306.cn/otn/czxx/queryByTrainNo`
-- Station names: discover the versioned `station_name*.js` script from `https://www.12306.cn/index/`.
-- Station sale times: `https://www.12306.cn/index/otn/index12306/queryAllCacheSaleTime`
+- 初始化会话：`https://kyfw.12306.cn/otn/leftTicket/init`
+- 查询直达车：程序从 `CLeftTicketUrl` 获取实际路径，常见路径包括 `/otn/leftTicket/queryG` 和 `/otn/leftTicket/query`
+- 查询票价：`https://kyfw.12306.cn/otn/leftTicket/queryTicketPrice`
+- 查询列车经停站：`https://kyfw.12306.cn/otn/czxx/queryByTrainNo`
+- 查询车站名称：从 `https://www.12306.cn/index/` 获取带版本号的 `station_name*.js` 文件
+- 查询车票起售时间：`https://www.12306.cn/index/otn/index12306/queryAllCacheSaleTime`
 
-These are public endpoints used by the official website, but they are not a documented developer API with a stability SLA. They need an initialized public Cookie session and can change paths or response fields. Respect rate limits, use a short cache, and do not retry indefinitely. A browser is not required for ordinary public queries.
+这些接口供 12306 官网使用，并不是有稳定性保证的开发者 API。程序需要先建立无需登录的公开会话，接口路径和返回字段也可能变化。应遵守访问频率限制、短期缓存查询结果，并限制重试次数。一般查询无需打开浏览器。
 
-The login-free direct endpoint does not provide a dependable official transfer-planning result. `rail_12306.py transfer` constructs a bounded timetable graph from direct queries. It then queries the full stop sequences of promising two-train pairs, intersects ordered stops, checks dated connection times, and requeries each segment so an intermediate regional station can compete on actual fare and inventory. This is still bounded: its default seed hubs are broad but not exhaustive, while hub, direct-query, stop-query, refinement and beam limits can truncate exploration. Always retain `search_coverage` in analysis and never promote `lowest_among_searched_candidates` to a network-wide optimum.
+无需登录的直达车接口不能可靠地提供官方换乘方案。`rail_12306.py transfer` 会根据直达车查询结果，在设定范围内组合时刻表；随后读取可能组成可行方案的两趟列车的完整经停站，查找两车依次停靠且可以换乘的车站，核对具体日期的换乘时间，再查询每一段的票价和余票。这样，中途经过的普通车站也可以按实际票价和余票参与比较。
 
-Transfer search distinguishes a named station from a city-wide query and checks cross-midnight datetimes and minimum same-station margins. Administrative city equality is not evidence of a feasible cross-station transfer. Cross-station candidates require both `--allow-cross-station` and a `--cross-station-rules` JSON file whose directed rules provide `from_station`, `to_station`, `duration_minutes`, `price_cny`, `source`, and optional `buffer_minutes` / `verified_at`. Obtain those values from a real local route query; without a matching rule the candidate is excluded. The ground time, fare and buffer are included in the itinerary.
+换乘搜索仍受范围限制：默认枢纽较多，但无法穷尽所有车站；枢纽数量、直达查询次数、经停站查询次数、补充查询次数和保留的备选方案数量都可能使搜索提前结束。分析时必须保留 `search_coverage`，不能把 `lowest_among_searched_candidates` 解释为全部车次中的最低费用。
 
-Seat policy also matters: `cheapest-available` uses currently available inventory; `sleeper-required` requires a sleeper on railway legs that actually cross the 22:00–06:00 window while keeping daytime feeder legs economical. Quoted-but-unavailable prices are a separate preview and are not executable recommendations.
+换乘搜索会区分指定车站与城市范围查询，并核对跨日时间和同站换乘的最低预留时间。两个车站位于同一地级行政区，不足以证明跨站换乘可行。跨站方案必须同时启用 `--allow-cross-station` 并提供 `--cross-station-rules` JSON 文件。每条有方向的规则都要包含 `from_station`、`to_station`、`duration_minutes`、`price_cny` 和 `source`，还可包含 `buffer_minutes` 和 `verified_at`。这些数据应来自实际的市内路线查询；没有匹配规则时，程序会排除该方案。接驳时间、费用和预留时间都会计入完整行程。
 
-Rail responses are snapshots. A missing target date can mean the date is outside the sale window, the timetable is unpublished, or the upstream request failed. Preserve those distinctions.
+席别规则也会影响结果：`cheapest-available` 按当前有票的席别选择最低费用；`sleeper-required` 要求在 22:00 至次日 06:00 之间运行的铁路路段使用卧铺，同时为白天的前后路段选择经济席别。只有票价但当前无票的席别应单独列作参考，不能作为可执行的推荐方案。
 
-## Shanghai Metro official website backend
+铁路查询结果只反映查询当时的状态。查不到目标日期，可能是因为尚未进入预售期、运行图尚未公布，也可能是上游请求失败；答复中应保留这些区别。
 
-Use `scripts/shanghai_metro.py` for Shanghai station-to-station routing.
+## 上海地铁官网接口
 
-- Station lookup: `https://m.shmetro.com/core/shmetro/mdstationinfoback_new.ashx`
-- Route and fare: `https://m.shmetro.com/interface/plantrip/pt.aspx`
+上海市内的地铁站间路线优先使用 `scripts/shanghai_metro.py`。
 
-No key or browser is required. The route response provides lines, transfer stations, a fare, in-vehicle time, an impedance-style expected duration, and usually last-boarding/last-arrival references. Prefer expected duration for comparison, and retain in-vehicle time as a separate field. It does not provide a dependable first-service field, so the adapter keeps `service_window_verified=false`; an early-morning connection still needs confirmation. This is city-specific and should not be presented as a national metro API.
+- 查询车站：`https://m.shmetro.com/core/shmetro/mdstationinfoback_new.ashx`
+- 查询路线和票价：`https://m.shmetro.com/interface/plantrip/pt.aspx`
 
-## AMap Web Service
+查询无需密钥或浏览器。接口会返回线路、换乘站、票价、车内时间、包含候车等因素的预计耗时，通常还会提供最晚进站或到达信息。方案比较优先采用预计耗时，同时把车内时间单独保留。接口不能稳定提供首班车信息，因此脚本会保留 `service_window_verified=false`；清晨行程仍需另行核对。这是上海专用接口，不能当作全国通用的地铁接口。
 
-Use `scripts/amap_transit.py` for addresses, walking legs, metro or bus routing outside the supported city-specific adapters.
+## 高德 Web 服务
 
-- Geocoding: `https://restapi.amap.com/v3/geocode/geo`
-- Integrated public transit: `https://restapi.amap.com/v3/direction/transit/integrated`
-- Walking: `https://restapi.amap.com/v3/direction/walking`
+地址解析、步行路线，以及尚无城市专用脚本的地铁或公交路线，使用 `scripts/amap_transit.py`。
 
-This is an official REST service and does not need a browser, but it requires a Web Service key. The adapter checks `AMAP_MAPS_API_KEY` first, then the native macOS Keychain or Windows Credential Manager. For credential setup or failures, read [AMap key setup](amap-key-setup.md). Never print, log, place the key in user-visible URLs, or persist it outside an approved native credential store. Respect the account quota. AMap may omit a transit fare; treat that as unknown rather than zero.
+- 地理编码：`https://restapi.amap.com/v3/geocode/geo`
+- 公共交通综合路线：`https://restapi.amap.com/v3/direction/transit/integrated`
+- 步行路线：`https://restapi.amap.com/v3/direction/walking`
 
-Pass every known province/city/district constraint to the adapter. It returns all normalized geocoding candidates and rejects an administrative conflict. It also rejects a province/city/district centroid when the query names a specific POI, station, campus, road address, or building. Retry with a verified full street address or trusted coordinates; do not weaken the constraint simply to obtain a route.
+高德 Web 服务是官方 REST 接口，无需浏览器，但需要 Web 服务密钥。脚本先读取 `AMAP_MAPS_API_KEY`，再读取 macOS 钥匙串或 Windows 凭据管理器。配置或排查凭据时，阅读[高德密钥配置](amap-key-setup.md)。不得输出或记录密钥，不得把密钥放进用户可见的网址，也不得将其保存在未经允许的位置。查询还应遵守账户配额。高德有时不返回公交票价，此时应将费用标为未知，不能按 0 元计算。
 
-The adapter serializes requests across processes, keeps only a short geocoding cache in the system temporary directory, and retries AMap QPS errors, HTTP 429 and 5xx with a finite backoff. The cache and throttle state never contain the key. Still invoke AMap routes sequentially rather than launching multiple adapters in parallel.
+调用脚本时，应提供已知的省、市和区县限制。脚本会返回规范化后的所有地理编码候选，并拒绝所属行政区冲突的结果。若查询对象是具体地点、车站、校区、道路地址或建筑，但结果只是省、市或区县中心点，脚本也会拒绝使用。此时应改用核实过的完整地址或可靠坐标，不能为了得到路线而放宽必要的地区限制。
 
-Integrated transit responses do not reliably prove that a suggested service is running at the requested early/late time. They carry `service_window_verified=false`; near a service boundary, seek a city-specific official source or label the first/last-service window unverified.
+脚本会让不同进程的高德请求依次执行，只在系统临时目录中短期缓存地理编码，并针对高德访问频率错误、HTTP 429 和 5xx 错误进行有限次数的延迟重试。缓存和限流状态中不保存密钥。即使如此，也应依次运行路线查询，不要并行启动多个高德脚本。
 
-For ordered via points, query consecutive segments and add user-specified dwell time. Public-transit routing does not guarantee one globally optimal route across arbitrary via points.
+公共交通综合路线无法确认建议的班次在指定的清晨或深夜时段是否运行，因此返回结果保留 `service_window_verified=false`。行程接近首末班时，应查询该城市的官方信息，或明确说明首末班时间尚未确认。
 
-## Fallback policy
+存在多个有先后顺序的途经点时，应分别查询相邻两点间的路线，并加入用户要求的停留时间。公共交通接口无法保证这样组合出的方案是所有途经路线中的全局最优方案。
 
-1. Pure API script with authoritative or structured data.
-2. Another official provider already available in the environment.
-3. Official website or map lookup when the API path is unavailable.
-4. Clearly labeled estimate or partial answer.
+## 备用查询顺序
 
-Do not silently substitute an old schedule, a different weekday, straight-line distance, or a generic metro fare rule for live provider data.
+1. 优先使用本技能附带的接口脚本和权威、结构化数据。
+2. 若首选来源不可用，使用当前环境中已有的其他官方数据来源。
+3. 接口无法使用时，查询官方网站或地图。
+4. 仍无法获得完整数据时，给出明确标注的估算或不完整结果。
+
+不得在没有说明的情况下，用旧时刻表、不同星期几的数据、直线距离或通用地铁计价规则代替当前查询结果。

@@ -1674,15 +1674,17 @@ def command_transfer(
         or bool(refinement_stats.get("truncated"))
     )
     if failed_pairs:
-        warnings.append(f"{len(failed_pairs)} 个铁路路段查询失败，搜索覆盖不完整")
+        warnings.append(
+            f"有 {len(failed_pairs)} 个铁路区段查询失败，当前结果未覆盖原定查询范围"
+        )
     if args.max_transfers >= 1:
         warnings.append(
-            "换乘结果来自有界枢纽搜索和经停站细化，只能称为“已查最低/最快”，不能称为全网绝对最优"
+            "换乘方案的查询范围受枢纽列表和查询次数限制；相关结论只能表述为“在已查询方案中费用最低”或“在已查询方案中用时最短”，不能视为所有车次中的最优结果"
         )
     if args.allow_cross_station and not cross_station_rules:
-        warnings.append("未提供已验证跨站接驳规则，跨站候选已排除")
+        warnings.append("未提供经过核实的跨站接驳数据，已排除所有跨站换乘方案")
     if any(not item["inventory_confirmed"] for item in itineraries):
-        warnings.append("部分候选仅有票价或非可售状态，出行前需复核余票")
+        warnings.append("部分方案只有票价信息或当前无票，出行前需重新查询余票")
 
     return {
         "query": {

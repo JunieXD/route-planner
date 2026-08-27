@@ -847,7 +847,7 @@ def main(argv: list[str] | None = None) -> int:
                 minutes = hour * 60 + minute
                 if minutes < 360 or minutes >= 1350:
                     warnings.append(
-                        "行程接近清晨或深夜，提供方未返回可核验的首末班窗口"
+                        "出发时间接近清晨或深夜，当前数据无法确认首末班时间"
                     )
         else:
             routes = walking_query(origin, destination, args, key=key)

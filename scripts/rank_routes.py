@@ -70,8 +70,8 @@ def apply_service_window_gate(route: dict[str, Any]) -> None:
         route.setdefault("earliest_if_service_available", arrival)
         route["estimated_arrival_at"] = None
     warnings = route.setdefault("warnings", [])
-    if isinstance(warnings, list) and "首末班运营时段待确认" not in warnings:
-        warnings.append("首末班运营时段待确认")
+    if isinstance(warnings, list) and "首末班时间待确认" not in warnings:
+        warnings.append("首末班时间待确认")
     route["time_complete"] = False
 
 

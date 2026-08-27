@@ -1,8 +1,8 @@
-# Normalized route schema
+# 路线数据结构
 
-Read this file when combining multiple providers, ordered via points, party pricing, or more than two transport legs.
+需要组合多个数据来源、按顺序经过多个途经点、计算多人费用，或处理三个以上交通路段时，阅读本文件。
 
-## Itinerary
+## 完整行程
 
 ```json
 {
@@ -62,23 +62,23 @@ Read this file when combining multiple providers, ordered via points, party pric
 }
 ```
 
-- `duration_minutes` is door-to-door, not only in-vehicle time.
-- `door_to_door_duration_minutes` repeats the complete user-facing total when it is known. `scheduled_span_minutes` measures the first-to-last fixed-service span; `in_vehicle_minutes`, `waiting_minutes`, `checkin_buffer_minutes`, and `local_connection_minutes` explain where the time went. `rank_routes.py` normalizes these fields even when a caller supplied only part of the breakdown.
-- If the real origin connection is unknown, set `unknown_origin_connection=true`, `duration_complete=false`, and `door_to_door_duration_minutes=null`. Keep the modeled railway span in `scheduled_span_minutes`; do not relabel it as the overall duration.
-- `recommended_leave_at` is when the traveler should leave the actual origin. It is not the railway departure time.
-- `primary_service_departure_at` is the scheduled departure of the main reserved service, normally the intercity train. Keep additional scheduled departures on their legs.
-- `estimated_arrival_at` is arrival at the user's final destination. Use `arrival_window` when unscheduled local transit or station-internal walking makes a point estimate look more precise than the data.
-- `price_cny_per_person` is the complete price when `price_complete=true`. When `price_complete=false`, it may be the known subtotal; describe it as `已知费用`, never as the total. Missing price is unknown, not zero.
-- `time_complete=false` means `duration_minutes` is only the modeled subtotal. List every omitted origin, destination, transfer, or dwell segment in `unmodeled_legs`; do not label such a route fastest.
-- `unpriced_legs` names included legs whose price is unknown. `unmodeled_legs` names legs absent from the timeline entirely. An unpriced but timed leg belongs only in the former.
-- `service_window_verified` is true only when a relevant first/last-service window was actually checked. Near a boundary, `rank_routes.py` changes an unverified point arrival into `earliest_if_service_available`, sets `arrival_estimate_confirmed=false`, and makes the timeline ineligible for a confirmed fastest/deadline claim.
-- `search_coverage` records how alternatives were generated. A bounded hub or beam search normally has `complete=false`; report queried hubs/pairs, maximum transfers and truncation, and use `已查最省/最快` rather than an absolute claim.
-- `risk_score` is in `[0, 1]`; use it only for real differences such as tight transfers, cross-station travel, unpriced legs, stale data, or low-frequency services.
-- `connection_reliability` describes the chance of making fixed connections. `transfer_burden` and `overnight_seated_minutes` describe effort or discomfort. Do not collapse a long but reliable wait into the same concept as a tight risky connection.
-- `inventory_confirmed=false` or `executable=false` means a fare is only a quote or inventory is unavailable. Such a route may be shown as a preview but cannot receive recommendation, fastest, cheapest, fewest-transfer, or Pareto labels.
-- `transfer_count` counts vehicle changes. Walking into the first station is not a transfer.
+- `duration_minutes` 表示完整行程耗时，不只是乘车时间。
+- `door_to_door_duration_minutes` 是为兼容现有脚本而保留的字段；数据完整时，它与向用户展示的完整行程总耗时相同。`scheduled_span_minutes` 表示第一个固定班次发车至最后一个固定班次到达之间的时间；`in_vehicle_minutes`、`waiting_minutes`、`checkin_buffer_minutes` 和 `local_connection_minutes` 用来说明时间构成。即使调用方只提供部分明细，`rank_routes.py` 也会整理这些字段。
+- 无法确定实际起点到首站的接驳时，应设置 `unknown_origin_connection=true`、`duration_complete=false` 和 `door_to_door_duration_minutes=null`。已计算的铁路行程跨度仍保存在 `scheduled_span_minutes` 中，不能改称完整行程总耗时。
+- `recommended_leave_at` 表示旅客从实际起点出发的建议时间，不是列车发车时间。
+- `primary_service_departure_at` 表示主要固定班次的计划发车时间，通常是城际列车。其他固定班次的发车时间保存在对应路段中。
+- `estimated_arrival_at` 表示到达用户最终目的地的时间。如果市内交通没有固定时刻，或站内步行时间会让单一时刻显得过于精确，应改用 `arrival_window` 表示到达时间范围。
+- `price_complete=true` 时，`price_cny_per_person` 才表示每人完整费用；`price_complete=false` 时，它可以表示已知部分的费用，但必须写成“已知费用”，不能写成总费用。缺少价格表示未知，不能按 0 元计算。
+- `time_complete=false` 表示 `duration_minutes` 只是目前能够计算的时间。所有遗漏的出发地接驳、目的地接驳、换乘或停留路段都应列入 `unmodeled_legs`，此类路线不能标为最快。
+- `unpriced_legs` 列出已经计入时间但费用未知的路段；`unmodeled_legs` 列出没有计入时间线的路段。某个路段若已计时但费用未知，只应放入前者。
+- 只有实际核对过相关首末班时间，`service_window_verified` 才能设为 `true`。行程接近首末班且时间尚未确认时，`rank_routes.py` 会将单一到达时刻改为 `earliest_if_service_available`，设置 `arrival_estimate_confirmed=false`，并不再用该方案判断最快路线或能否按时到达。
+- `search_coverage` 记录备选方案的查找方式。按限定枢纽或候选数量搜索时，`complete` 通常为 `false`；应说明查过的枢纽或车次组合、最多换乘次数，以及查询是否提前结束，并写“在已查询方案中费用最低”或“在已查询方案中用时最短”，不能据此断言已经找到了所有车次中的最低费用或最短用时。
+- `risk_score` 的取值范围是 `[0, 1]`，只应反映确有依据的差异，例如换乘时间紧、需要跨站、部分费用未知、数据较旧或班次稀少。
+- `connection_reliability` 表示能否赶上固定班次；`transfer_burden` 和 `overnight_seated_minutes` 表示旅途劳累或不便。候车时间长可能更容易赶上后续班次，但也更累，不能把两者合并成同一个判断。
+- `inventory_confirmed=false` 或 `executable=false` 表示票价仅供参考或当前无票。此类路线可以作为参考，但不能标为推荐、最快、最省、少换乘，也不能列入帕累托前沿。
+- `transfer_count` 只计算更换交通工具的次数；步行进入第一个车站不算换乘。
 
-## Leg
+## 路段
 
 ```json
 {
@@ -98,18 +98,20 @@ Read this file when combining multiple providers, ordered via points, party pric
 }
 ```
 
-Use `buffer` for railway check-in or conservative interchange allowance and `dwell` for time intentionally spent at a via point. This makes the total explainable and prevents hidden padding.
+铁路进站预留和保守的换乘预留使用 `buffer`，用户要求在途经点停留的时间使用 `dwell`。这样可以清楚说明总耗时的构成，避免加入没有说明的预留时间。
 
-## Combining times
+## 组合时间
 
-For scheduled legs, use their actual timestamps. Insert transfer or buffer time between legs rather than simply summing vehicle durations. Reject combinations whose next departure precedes the previous arrival plus the required transfer time.
+有固定时刻的路段应使用实际发车和到达时间。不同路段之间要另行加入换乘或预留时间，不能只把各段乘车时间相加。如果下一班车的发车时间早于上一段到达时间与必要换乘时间之和，应排除该组合。
 
-For unscheduled local legs, sum expected durations and expose uncertainty as a range when the provider does not model wait time or station-internal walking.
+市内交通没有固定时刻时，应累加预计耗时；若数据来源没有计入候车或站内步行，应使用时间范围表示不确定性。
 
-Derive `recommended_leave_at` from the first door-to-door leg, `primary_service_departure_at` from the main scheduled service, and `estimated_arrival_at` from the final leg. When planning backward from an arrival deadline, select a feasible final arrival first and then calculate the latest safe leave time with all buffers intact.
+`recommended_leave_at` 根据完整行程的第一个路段得出，`primary_service_departure_at` 取主要固定班次的发车时间，`estimated_arrival_at` 取最后一个路段的到达时间。按最晚到达时间倒推时，先选择符合要求的最终到达班次，再在保留所有必要预留时间的前提下计算最晚安全出发时间。
 
-If the user supplied only a city, district, or unlocated origin, do not invent the first leg. Leave `recommended_leave_at` null, add that origin leg to `unmodeled_legs`, and state the latest time the traveler must reach the first modeled station plus their own origin-to-station time.
+如果用户只提供城市、区县，或无法定位的出发地，不要编造第一段路线。应将 `recommended_leave_at` 设为空，把这一段加入 `unmodeled_legs`，并告诉用户最晚应在何时到达第一个已计算的车站，另加其自行前往车站的时间。
 
-## Ranking
+## 方案排序
 
-Apply hard filters first. A partial price cannot prove a budget is met, and a partial timeline cannot prove a duration or transfer limit is met. Rank only after origin and destination connections have been attached, because a different arrival station can reverse the railway-only order. Among complete executable routes, use duration, price, transfers, and reliability; retain burden as a separate tradeoff. Routes with incomplete prices may compete for fastest only when their time is complete; they cannot be labeled cheapest. Preserve at least the Pareto frontier when a cheaper route is slower or a faster route costs more.
+先排除不满足必要条件的方案。费用不完整时，不能据此判断是否符合预算；时间线不完整时，也不能据此判断是否符合总耗时或换乘次数限制。只有补齐出发地和目的地的接驳路线后才能排序，因为不同到达站可能改变只比较铁路部分时的先后次序。
+
+对于数据完整且实际可行的方案，应综合比较耗时、费用、换乘次数和可靠性，并将旅途负担作为单独的取舍因素。费用不完整但时间完整的路线可以参与最快方案比较，但不能标为最省。当低价方案更慢或快速方案更贵时，至少保留帕累托前沿中的方案。
