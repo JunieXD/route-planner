@@ -14,6 +14,10 @@ Use `scripts/rail_12306.py` first.
 
 These are public endpoints used by the official website, but they are not a documented developer API with a stability SLA. They need an initialized public Cookie session and can change paths or response fields. Respect rate limits, use a short cache, and do not retry indefinitely. A browser is not required for ordinary public queries.
 
+The login-free direct endpoint does not provide a dependable official transfer-planning result. `rail_12306.py transfer` constructs a bounded timetable graph from direct queries. Its default hub list is broad but not exhaustive; `--hubs` can replace it, and query/beam limits may truncate two-transfer exploration. Always retain `search_coverage` in analysis and never promote `lowest_among_searched_candidates` to a network-wide optimum.
+
+Transfer search distinguishes a named station from a city-wide query, checks cross-midnight datetimes, and applies separate same-station and same-city cross-station minimums. Cross-station transfer is opt-in because the adapter does not calculate the road journey between railway stations. Seat policy also matters: `cheapest-available` uses currently available inventory; `sleeper-required` requires a sleeper on railway legs that actually cross the 22:00–06:00 window while keeping daytime feeder legs economical. Quoted-but-unavailable prices must be described as a preview.
+
 Rail responses are snapshots. A missing target date can mean the date is outside the sale window, the timetable is unpublished, or the upstream request failed. Preserve those distinctions.
 
 ## Shanghai Metro official website backend
@@ -23,7 +27,7 @@ Use `scripts/shanghai_metro.py` for Shanghai station-to-station routing.
 - Station lookup: `https://m.shmetro.com/core/shmetro/mdstationinfoback_new.ashx`
 - Route and fare: `https://m.shmetro.com/interface/plantrip/pt.aspx`
 
-No key or browser is required. The route response provides lines, transfer stations, a fare, in-vehicle time and an impedance-style expected duration. Prefer expected duration for comparison, and retain in-vehicle time as a separate field. This is city-specific and should not be presented as a national metro API.
+No key or browser is required. The route response provides lines, transfer stations, a fare, in-vehicle time, an impedance-style expected duration, and usually last-boarding/last-arrival references. Prefer expected duration for comparison, and retain in-vehicle time as a separate field. It does not provide a dependable first-service field, so the adapter keeps `service_window_verified=false`; an early-morning connection still needs confirmation. This is city-specific and should not be presented as a national metro API.
 
 ## AMap Web Service
 
@@ -31,8 +35,15 @@ Use `scripts/amap_transit.py` for addresses, walking legs, metro or bus routing 
 
 - Geocoding: `https://restapi.amap.com/v3/geocode/geo`
 - Integrated public transit: `https://restapi.amap.com/v3/direction/transit/integrated`
+- Walking: `https://restapi.amap.com/v3/direction/walking`
 
 This is an official REST service and does not need a browser, but it requires a Web Service key. The adapter checks `AMAP_MAPS_API_KEY` first, then the native macOS Keychain or Windows Credential Manager. For credential setup or failures, read [AMap key setup](amap-key-setup.md). Never print, log, place the key in user-visible URLs, or persist it outside an approved native credential store. Respect the account quota. AMap may omit a transit fare; treat that as unknown rather than zero.
+
+Pass every known province/city/district constraint to the adapter. It returns all normalized geocoding candidates and rejects an administrative conflict. It also rejects a province/city/district centroid when the query names a specific POI, station, campus, road address, or building. Retry with a verified full street address or trusted coordinates; do not weaken the constraint simply to obtain a route.
+
+The adapter serializes requests across processes, keeps only a short geocoding cache in the system temporary directory, and retries AMap QPS errors, HTTP 429 and 5xx with a finite backoff. The cache and throttle state never contain the key. Still invoke AMap routes sequentially rather than launching multiple adapters in parallel.
+
+Integrated transit responses do not reliably prove that a suggested service is running at the requested early/late time. They carry `service_window_verified=false`; near a service boundary, seek a city-specific official source or label the first/last-service window unverified.
 
 For ordered via points, query consecutive segments and add user-specified dwell time. Public-transit routing does not guarantee one globally optimal route across arbitrary via points.
 

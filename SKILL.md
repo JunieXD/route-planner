@@ -11,13 +11,14 @@ description: "规划中国境内铁路、地铁、公交和步行组成的门到
 
 1. 提取日期、人数、起终点、途经点、期望出发时段或最晚到达时间、席别、允许的交通方式，以及“最快 / 最省 / 均衡 / 少换乘”等偏好。日期已知但全天班次很多时，时间窗口会显著改变结论，应询问或明确采用的时段；其余缺失项作出明确标注的合理假设。
 2. 区分硬约束和排序偏好。先淘汰违反预算、到达窗口、席别、无障碍或途经要求的方案，再比较剩余候选。
-3. 跨城铁路先运行 `scripts/rail_12306.py`。若用户给出具体车站，保留该车站；若只给城市，应比较该城市实际可用的多个到发站，不能只比较高铁车程。
+3. 跨城铁路先运行 `scripts/rail_12306.py direct`。若没有直达或换乘可能更符合偏好，再运行 `transfer`：默认做有限枢纽搜索，最多两次换乘，检查跨日时刻、同站/同城跨站和最小换乘余量。读取其 `search_coverage`；覆盖不完整时只能写“已查最省/最快”，不能写“全网最低/最快”。若用户给出具体车站，保留该车站；若只给城市，应比较该城市实际可用的多个到发站。
 4. 为每个铁路到发站补齐首末段：
    - 上海地铁使用 `scripts/shanghai_metro.py`，无需浏览器或密钥。
    - 其他城市优先使用 `scripts/amap_transit.py`；它依次从 `AMAP_MAPS_API_KEY`、macOS 钥匙串或 Windows 凭据管理器读取高德 Web Service Key。
    - 无可用 API 时，说明缺失项，再使用可用的官方网页或地图进行人工式查询；不得把未知票价或耗时填成精确值。
-5. 途经点按用户给定顺序拆成连续路段。将换乘步行、候车、铁路进站预留和用户要求的停留时间分别计入，避免只相加车内时间。若用户给出最晚到达时间，应倒推最晚安全出门时间并把到达期限作为硬约束。
-6. 多个完整候选可按 [路线数据结构](references/route-schema.md) 整理，再运行 `scripts/rank_routes.py`。输出 Pareto 有效方案，不用数量凑表格。
+5. 地址进入路线 API 前先校验地理编码。把用户给出的省、市、区县、校区、车站和门牌限定转成 `--origin-*` / `--destination-*` 约束；若结果行政区冲突，或具体地点只解析到省、市、区县中心点，停止该候选并换用完整地址或可靠坐标。不能为了得到路线而静默接受低精度坐标。
+6. 途经点按用户给定顺序拆成连续路段。将换乘步行、候车、铁路进站预留和用户要求的停留时间分别计入，避免只相加车内时间。若用户给出最晚到达时间，应倒推最晚安全出门时间并把到达期限作为硬约束。
+7. 多个候选按 [路线数据结构](references/route-schema.md) 整理，再运行 `scripts/rank_routes.py`。先标明费用、时间和路段是否完整，再输出 Pareto 有效方案，不用数量凑表格。
 
 选择数据源或处理上游异常时，读取 [provider 说明](references/providers.md)。组合三个以上路段、计算团队总价或解释总耗时时，读取 [路线数据结构](references/route-schema.md)。形成最终用户答复时读取 [紧凑输出格式](references/output-format.md)。
 
@@ -31,7 +32,9 @@ description: "规划中国境内铁路、地铁、公交和步行组成的门到
 - 用户未指定时，铁路出发前预留暂按 30 分钟，并把它列为假设；大型车站、节假日、首次到站或需取报销凭证时可提高。
 - 路线服务若从车站入口开始，另计列车下车至地铁闸机或站外接驳点的站内步行；没有可靠数据时给范围，不给伪精确值。
 - 报告每人价格和按出行人数计算的总价。未知或不含的费用必须单列，不能当作 0 元。
+- 只有 `price_complete=true` 才能写“总费用”和标“最省”；否则写“已知费用 ¥x + 某路段待定”。只有 `time_complete=true` 且没有未建模路段，才能写门到门“总耗时”和标“最快”。
 - 票价、余票、运营状态都要带查询时间。超出铁路预售期时，只能把同星期运行图或历史票价作为预览，并清楚标注，不能称为目标日期实时结果。
+- 清晨和深夜接续必须检查 `service_window_verified`。提供方没有首末班数据时标“首末班待确认”，不要从普通路线耗时推断一定可乘。
 
 ## 用户通常还会在意
 
@@ -39,10 +42,11 @@ description: "规划中国境内铁路、地铁、公交和步行组成的门到
 - 方案是否稳妥：余票或开售状态、数据新鲜度、公交班次稀疏、首末班车限制、动态票价和未计费用。只对有证据的差异标“稳 / 一般 / 赶 / 待确认”。
 - 出行负担：换乘次数、最长连续步行、行李、老人儿童、轮椅或电梯需求。仅在用户提出或路线差异明显时展开，避免默认堆满表格。
 - 价格包含什么：逐段票价、每人合计、全员合计，以及出租车浮动价、优惠资格或未定价路段等未包含项。
+- 过夜质量：最低价坐席和最低价可卧睡方案分开比较；使用 `cheapest-available`、`seat-only`、`sleeper-required` 或指定席别，不能把舒适度混入票价。
 
 ## 输出要求
 
-先用一句话给结论，再用一张紧凑表展示三至五个真实有效候选。每行必须让用户直接看到“建议出门 → 核心班次发车 → 最终到达”、门到门总耗时、每人/全员价格、换乘与步行负担、稳妥度或关键提醒。不要先写长篇分析，也不要逐方案重复相同信息。
+先用一句话给结论，再用一张紧凑表展示三至五个真实有效候选。每行必须让用户直接看到“建议出门 → 核心班次发车 → 最终到达”、门到门总耗时、每人/全员价格、换乘与步行负担、稳妥度或关键提醒。起点只精确到城市/区县时，写“应在 HH:MM 前到站；另加住处接驳”，不要伪造出门时间。不要先写长篇分析，也不要逐方案重复相同信息。
 
 表后只展开推荐方案的逐段时间线，以及一个确实影响决策的备选；其余细节按需提供。把数据来源、查询时间、假设和共同的不确定项压缩到表后短注。具体排版遵循 [紧凑输出格式](references/output-format.md)。
 
@@ -53,12 +57,14 @@ description: "规划中国境内铁路、地铁、公交和步行组成的门到
 ```bash
 python3 scripts/rail_12306.py station --name "上海"
 python3 scripts/rail_12306.py direct --date 2026-09-04 --from "杭州东" --to "上海" --train-types G,C --depart-after 08:00 --depart-before 11:00 --sort duration --limit 10
+python3 scripts/rail_12306.py transfer --date 2026-09-10 --from "宁都" --to "上海" --max-transfers 1 --seat-policy cheapest-available --sort price --limit 10
 python3 scripts/rail_12306.py sale-time --station "杭州东"
 
 python3 scripts/shanghai_metro.py route --date 2026-09-11 --from "上海南站" --to "金沙江路" --limit 3
 
 python3 scripts/amap_credentials.py status
-python3 scripts/amap_transit.py --origin "杭州东站" --destination "西湖文化广场" --origin-city "杭州" --destination-city "杭州"
+python3 scripts/amap_transit.py transit --origin "杭州东站" --destination "西湖文化广场" --origin-city "杭州" --origin-district "上城" --destination-city "杭州" --destination-district "拱墅"
+python3 scripts/amap_transit.py walk --origin "金沙江路地铁站" --destination "上海市普陀区中山北路3663号" --origin-city "上海" --destination-city "上海" --destination-district "普陀"
 
 python3 scripts/rank_routes.py routes.json --optimize balanced --party-size 2 --limit 5
 ```
@@ -70,4 +76,5 @@ python3 scripts/rank_routes.py routes.json --optimize balanced --party-size 2 --
 - 只查询公开交通信息，不索取或保存 12306 账号、Cookie、身份证、联系人或支付信息。
 - 不执行购票、候补、选座、改签、退票或支付。
 - 不绕过验证码、限流或访问控制。短暂失败可有限重试；持续失败时报告上游状态。
+- 高德请求顺序执行；适配器会跨进程节流并对限流、429 和 5xx 有限退避。不要并发启动多个高德查询，也不要无限重试。
 - 本 skill 规划交通，不扩展为酒店、景点或完整旅游日程，除非用户另行要求。

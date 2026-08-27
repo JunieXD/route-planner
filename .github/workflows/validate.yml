@@ -22,7 +22,9 @@ jobs:
       - name: Check command interfaces
         run: |
           python scripts/rail_12306.py --help
+          python scripts/rail_12306.py transfer --help
           python scripts/shanghai_metro.py --help
           python scripts/amap_transit.py --help
+          python scripts/amap_transit.py walk --help
           python scripts/amap_credentials.py --help
           python scripts/rank_routes.py --help

@@ -15,7 +15,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-
 STATION_URL = "https://m.shmetro.com/core/shmetro/mdstationinfoback_new.ashx"
 ROUTE_URL = "https://m.shmetro.com/interface/plantrip/pt.aspx"
 USER_AGENT = "Mozilla/5.0 Shanghai-Metro-Route-Planner/1.0"
@@ -44,7 +43,9 @@ def fetch_text(url: str, timeout: float, retries: int) -> str:
             )
             with urlopen(request, timeout=timeout) as response:
                 raw = response.read()
-                return raw.decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+                return raw.decode(
+                    response.headers.get_content_charset() or "utf-8", errors="replace"
+                )
         except HTTPError as error:
             last_error = error
             if error.code != 429 and error.code < 500:
@@ -61,7 +62,9 @@ def fetch_json(url: str, timeout: float, retries: int) -> dict[str, Any]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as error:
-        raise UpstreamError(f"route backend did not return JSON: {text[:160]}") from error
+        raise UpstreamError(
+            f"route backend did not return JSON: {text[:160]}"
+        ) from error
     if not isinstance(payload, dict):
         raise UpstreamError("route backend JSON root is not an object")
     return payload
@@ -71,7 +74,8 @@ def search_station(name: str, timeout: float, retries: int) -> list[dict[str, st
     url = f"{STATION_URL}?{urlencode({'act': 'ssdiv', 'cv': name})}"
     html = fetch_text(url, timeout, retries)
     matches = re.findall(
-        r'<a[^>]+id="(\d{4})"[^>]+title="([^"]+)"[^>]*>[\s\S]*?<span class="st-name">([^<]+)</span>',
+        r'<a[^>]+id="(\d{4})"[^>]+title="([^"]+)"[^>]*>[\s\S]*?'
+        r'<span class="st-name">([^<]+)</span>',
         html,
         re.I,
     )
@@ -82,16 +86,28 @@ def search_station(name: str, timeout: float, retries: int) -> list[dict[str, st
             {
                 "station_id": station_id,
                 "station_name": unescape(station_name).strip(),
-                "line": line_match.group(1) if line_match else station_id[:2].lstrip("0"),
+                "line": line_match.group(1)
+                if line_match
+                else station_id[:2].lstrip("0"),
             }
         )
     return stations
 
 
 def weekday_for(value: str | None) -> int:
-    target = date.today() if value is None else datetime.strptime(value, "%Y-%m-%d").date()
+    target = (
+        date.today() if value is None else datetime.strptime(value, "%Y-%m-%d").date()
+    )
     python_weekday = target.weekday()
     return 0 if python_weekday == 6 else python_weekday + 1
+
+
+def hhmm(value: str) -> str:
+    try:
+        datetime.strptime(value, "%H:%M")
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"invalid HH:MM time: {value}") from error
+    return value
 
 
 def int_or_none(value: Any) -> int | None:
@@ -115,10 +131,20 @@ def normalize_path(
     destination_id: str,
     queried_at: str,
 ) -> dict[str, Any]:
-    transfers = path.get("transferStationList") if isinstance(path.get("transferStationList"), list) else []
-    pass_stations = path.get("passStationList") if isinstance(path.get("passStationList"), list) else []
+    transfers = (
+        path.get("transferStationList")
+        if isinstance(path.get("transferStationList"), list)
+        else []
+    )
+    pass_stations = (
+        path.get("passStationList")
+        if isinstance(path.get("passStationList"), list)
+        else []
+    )
     expected = int_or_none(path.get("impedancevalue"))
-    in_vehicle = int_or_none(path.get("time")) or int_or_none(path.get("beginTravelTime"))
+    in_vehicle = int_or_none(path.get("time")) or int_or_none(
+        path.get("beginTravelTime")
+    )
     if expected is None:
         expected = in_vehicle
     return {
@@ -131,7 +157,11 @@ def normalize_path(
         "fare_cny_per_person": float_or_none(path.get("price")),
         "transfer_count": int_or_none(path.get("passLineCount")) or 0,
         "station_count": int_or_none(path.get("stationNum")),
-        "lines": [str(item.get("line")) for item in transfers if isinstance(item, dict) and item.get("line") is not None],
+        "lines": [
+            str(item.get("line"))
+            for item in transfers
+            if isinstance(item, dict) and item.get("line") is not None
+        ],
         "directions": [
             {
                 "line": str(item.get("line")),
@@ -142,9 +172,14 @@ def normalize_path(
             for item in transfers
             if isinstance(item, dict)
         ],
-        "stations": [item.get("stationName") for item in pass_stations if isinstance(item, dict)],
+        "stations": [
+            item.get("stationName") for item in pass_stations if isinstance(item, dict)
+        ],
         "last_boarding_time": path.get("lastBoardingTime"),
         "last_arrival_time": path.get("lastArrivalTime"),
+        "first_service_verified": False,
+        "last_service_verified": bool(path.get("lastBoardingTime")),
+        "service_window_verified": False,
         "source": "shanghai-metro-official",
         "queried_at": queried_at,
     }
@@ -194,7 +229,9 @@ def command_route(args: argparse.Namespace) -> dict[str, Any]:
     if args.from_id:
         origins = [item for item in origins if item["station_id"] == args.from_id]
     if args.to_id:
-        destinations = [item for item in destinations if item["station_id"] == args.to_id]
+        destinations = [
+            item for item in destinations if item["station_id"] == args.to_id
+        ]
     if not origins:
         raise ValueError(f"Shanghai Metro station not found: {args.from_name}")
     if not destinations:
@@ -240,6 +277,13 @@ def command_route(args: argparse.Namespace) -> dict[str, Any]:
     )
     if args.limit:
         routes = routes[: args.limit]
+    warnings: list[str] = []
+    hour, minute = map(int, args.time.split(":"))
+    requested_minutes = hour * 60 + minute
+    if requested_minutes < 360:
+        warnings.append("官方路线结果未提供可核验的首班时刻，清晨接续待确认")
+    elif requested_minutes >= 1350:
+        warnings.append("行程接近末班时段，应按返回的末班上车时间逐条复核")
     return {
         "query": {
             "from": args.from_name,
@@ -251,6 +295,7 @@ def command_route(args: argparse.Namespace) -> dict[str, Any]:
         },
         "source": "shanghai-metro-official",
         "queried_at": now_iso(),
+        "warnings": warnings,
         "count": len(routes),
         "routes": routes,
     }
@@ -271,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--from-id")
     route.add_argument("--to-id")
     route.add_argument("--date")
-    route.add_argument("--time", default="09:00")
+    route.add_argument("--time", type=hhmm, default="09:00")
     route.add_argument("--ticket", choices=["oneCard", "oneWay"], default="oneCard")
     route.add_argument("--limit", type=int, default=5)
     return parser
@@ -280,11 +325,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        result = command_station(args) if args.command == "station" else command_route(args)
+        if args.timeout <= 0:
+            raise ValueError("--timeout must be positive")
+        if args.retries < 0:
+            raise ValueError("--retries must be non-negative")
+        if hasattr(args, "limit") and args.limit < 0:
+            raise ValueError("--limit must be non-negative")
+        result = (
+            command_station(args) if args.command == "station" else command_route(args)
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as error:
-        print(json.dumps({"error": str(error), "type": type(error).__name__}, ensure_ascii=False), file=sys.stderr)
+        print(
+            json.dumps(
+                {"error": str(error), "type": type(error).__name__}, ensure_ascii=False
+            ),
+            file=sys.stderr,
+        )
         return 1
 
 
